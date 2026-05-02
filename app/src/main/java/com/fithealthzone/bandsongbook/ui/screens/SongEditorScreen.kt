@@ -123,6 +123,7 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 10.dp)
                 .padding(bottom = 60.dp),
@@ -704,45 +705,52 @@ private fun wrapSelectionWithChordTag(value: TextFieldValue): TextFieldValue {
 }
 
 private fun clearFormattingFromSelection(value: TextFieldValue): TextFieldValue {
+    if (value.text.isEmpty()) return value
     val start = min(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
     val end = max(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
     if (start == end) return value
 
-    val lineStart = value.text.lastIndexOf('\n', startIndex = (start - 1).coerceAtLeast(0))
-        .let { if (it == -1) 0 else it + 1 }
-    val lineEnd = value.text.indexOf('\n', startIndex = end)
-        .let { if (it == -1) value.text.length else it }
+    return try {
+        val safeSearchEnd = (end - 1).coerceIn(0, value.text.length - 1)
 
-    val blockStartCandidates = listOf(
-        value.text.lastIndexOf("<mark>", startIndex = end.coerceAtMost(value.text.length - 1)),
-        value.text.lastIndexOf("<b>", startIndex = end.coerceAtMost(value.text.length - 1)),
-        value.text.lastIndexOf("<i>", startIndex = end.coerceAtMost(value.text.length - 1)),
-        value.text.lastIndexOf("<u>", startIndex = end.coerceAtMost(value.text.length - 1)),
-        value.text.lastIndexOf("<color=", startIndex = end.coerceAtMost(value.text.length - 1))
-    ).filter { it >= 0 }
-    val blockStart = blockStartCandidates.minOrNull() ?: lineStart
+        val lineStart = value.text.lastIndexOf('\n', startIndex = (start - 1).coerceAtLeast(0))
+            .let { if (it == -1) 0 else it + 1 }
+        val lineEnd = value.text.indexOf('\n', startIndex = end)
+            .let { if (it == -1) value.text.length else it }
 
-    val blockEndCandidates = listOf(
-        value.text.indexOf("</mark>", startIndex = start).takeIf { it >= 0 }?.plus("</mark>".length) ?: -1,
-        value.text.indexOf("</b>", startIndex = start).takeIf { it >= 0 }?.plus("</b>".length) ?: -1,
-        value.text.indexOf("</i>", startIndex = start).takeIf { it >= 0 }?.plus("</i>".length) ?: -1,
-        value.text.indexOf("</u>", startIndex = start).takeIf { it >= 0 }?.plus("</u>".length) ?: -1,
-        value.text.indexOf("</color>", startIndex = start).takeIf { it >= 0 }?.plus("</color>".length) ?: -1
-    ).filter { it >= 0 }
-    val blockEnd = blockEndCandidates.maxOrNull() ?: lineEnd
+        val blockStartCandidates = listOf(
+            value.text.lastIndexOf("<mark>", startIndex = safeSearchEnd),
+            value.text.lastIndexOf("<b>", startIndex = safeSearchEnd),
+            value.text.lastIndexOf("<i>", startIndex = safeSearchEnd),
+            value.text.lastIndexOf("<u>", startIndex = safeSearchEnd),
+            value.text.lastIndexOf("<color=", startIndex = safeSearchEnd)
+        ).filter { it >= 0 }
+        val blockStart = (blockStartCandidates.minOrNull() ?: lineStart).coerceIn(0, start)
 
-    val target = value.text.substring(blockStart, blockEnd)
-        .replace(Regex("(?i)</?mark>"), "")
-        .replace(Regex("(?i)</?b>"), "")
-        .replace(Regex("(?i)</?i>"), "")
-        .replace(Regex("(?i)</?u>"), "")
-        .replace(Regex("(?i)<color=[^>]+>|</color>"), "")
+        val blockEndCandidates = listOf(
+            value.text.indexOf("</mark>", startIndex = start).takeIf { it >= 0 }?.plus("</mark>".length) ?: -1,
+            value.text.indexOf("</b>", startIndex = start).takeIf { it >= 0 }?.plus("</b>".length) ?: -1,
+            value.text.indexOf("</i>", startIndex = start).takeIf { it >= 0 }?.plus("</i>".length) ?: -1,
+            value.text.indexOf("</u>", startIndex = start).takeIf { it >= 0 }?.plus("</u>".length) ?: -1,
+            value.text.indexOf("</color>", startIndex = start).takeIf { it >= 0 }?.plus("</color>".length) ?: -1
+        ).filter { it >= 0 }
+        val blockEnd = (blockEndCandidates.maxOrNull() ?: lineEnd).coerceIn(end, value.text.length)
 
-    val newText = value.text.substring(0, blockStart) + target + value.text.substring(blockEnd)
-    return TextFieldValue(
-        text = newText,
-        selection = TextRange(blockStart, blockStart + target.length)
-    )
+        val target = value.text.substring(blockStart, blockEnd)
+            .replace(Regex("(?i)</?mark>"), "")
+            .replace(Regex("(?i)</?b>"), "")
+            .replace(Regex("(?i)</?i>"), "")
+            .replace(Regex("(?i)</?u>"), "")
+            .replace(Regex("(?i)<color=[^>]+>|</color>"), "")
+
+        val newText = value.text.substring(0, blockStart) + target + value.text.substring(blockEnd)
+        TextFieldValue(
+            text = newText,
+            selection = TextRange(blockStart, blockStart + target.length)
+        )
+    } catch (_: Exception) {
+        value
+    }
 }
 
 private fun wrapSelectionWithCustomTags(value: TextFieldValue, openTag: String, closeTag: String): TextFieldValue {

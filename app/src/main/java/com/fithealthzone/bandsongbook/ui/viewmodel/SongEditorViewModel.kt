@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fithealthzone.bandsongbook.AppContainer
 import com.fithealthzone.bandsongbook.data.local.SongEntity
+import com.fithealthzone.bandsongbook.transpose.ChordDetector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -43,6 +44,7 @@ class SongEditorViewModel : ViewModel() {
             val memberName = runCatching {
                 AppContainer.settingsRepository.getSyncSettingsSnapshot().memberName.trim().ifBlank { null }
             }.getOrNull()
+            val processedLyrics = ChordDetector.autoWrapChords(s.lyrics)
 
             AppContainer.songRepository.saveSong(
                 SongEntity(
@@ -52,7 +54,7 @@ class SongEditorViewModel : ViewModel() {
                     originalKey = s.key.ifBlank { "C" },
                     currentTranspose = existing?.currentTranspose ?: 0,
                     preferFlats = s.preferFlats,
-                    lyricsWithChords = s.lyrics,
+                    lyricsWithChords = processedLyrics,
                     notes = s.notes.ifBlank { null },
                     bpm = s.bpm.toIntOrNull(),
                     capo = s.capo.toIntOrNull(),

@@ -336,8 +336,25 @@ fun SongViewerScreen(
                         color = AppColors.TextWhite,
                         fontSize = 21.sp,
                         fontWeight = FontWeight.Black,
-                        modifier = Modifier.padding(bottom = 10.dp)
+                        modifier = Modifier.padding(bottom = 4.dp)
                     )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    ) {
+                        val currentKeyLabel = remember(song?.originalKey, transpose, preferFlats) {
+                            song?.originalKey
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { ChordTransposer.transposeChord(it, transpose, preferFlats) }
+                                ?: "C"
+                        }
+                        KeyBadge(currentKeyLabel)
+                        val capoValue = song?.capo
+                        if (capoValue != null && capoValue > 0) {
+                            TinyMetaChip("Capo $capoValue")
+                        }
+                    }
                 }
                 items(renderedLines) { line ->
                     Box(
@@ -461,6 +478,11 @@ fun SongViewerScreen(
                             ?: "C"
                     }
                     KeyBadge(currentKeyLabel)
+                    val capoValue = song?.capo
+                    if (capoValue != null && capoValue > 0) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        TinyMetaChip("Capo $capoValue")
+                    }
                 }
             }
         }
@@ -1002,7 +1024,7 @@ private fun renderLineWithChordHighlights(
                 }
                 val rawToken = match.value
                 val chord = match.groupValues[1]
-                val paddedChord = chord + " ".repeat((rawToken.length - chord.length).coerceAtLeast(0))
+                val paddedChord = " " + chord + " "
                 withStyle(
                     segment.style.merge(
                         SpanStyle(
@@ -1066,7 +1088,7 @@ private fun renderLyricsParagraphsWithFormatting(
             }
             val rawToken = match.value
             val chord = match.groupValues[1]
-            val paddedChord = chord + " ".repeat((rawToken.length - chord.length).coerceAtLeast(0))
+            val paddedChord = " " + chord + " "
             currentParagraph.withStyle(
                 segment.style.merge(
                     SpanStyle(

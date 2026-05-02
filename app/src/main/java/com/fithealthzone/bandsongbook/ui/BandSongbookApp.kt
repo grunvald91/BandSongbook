@@ -1,9 +1,15 @@
 package com.fithealthzone.bandsongbook.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,12 +27,14 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,7 +42,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -71,11 +82,37 @@ fun BandSongbookApp() {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
     val snackbarHostState = remember { SnackbarHostState() }
+    var syncError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(currentDestination?.route) {
         if (currentDestination?.route != Dest.SongViewer.route) {
             AppContainer.songViewerFullscreen = false
             setSongFullscreen(false)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        try {
+            val settings = AppContainer.settingsRepository.getSyncSettingsSnapshot()
+            if (settings.baseUrl.isNotBlank() && settings.groupCode.isNotBlank()) {
+                AppContainer.syncRepository.pull(
+                    baseUrl = settings.baseUrl,
+                    groupCode = settings.groupCode,
+                    authToken = settings.authToken,
+                    memberName = settings.memberName.ifBlank { "Устройство" }
+                )
+                AppContainer.settingsRepository.setLastSyncSuccessEpochMs()
+                syncError = null
+            }
+        } catch (e: Exception) {
+            syncError = "Сбой синхронизации"
+        }
+    }
+
+    LaunchedEffect(syncError) {
+        if (syncError != null) {
+            delay(5000)
+            syncError = null
         }
     }
 
@@ -100,21 +137,53 @@ fun BandSongbookApp() {
                         items = items,
                         isSelected = { d -> currentDestination?.hierarchy?.any { it.route == d.route } == true },
                         onClick = { d ->
-                            navController.navigate(d.route) {
-                                popUpTo(navController.graph.startDestinationId) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
+                            if (d == Dest.Songs) {
+                                navController.navigate(d.route) {
+                                    popUpTo(navController.graph.startDestinationId) {
+                                        saveState = false
+                                        inclusive = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = false
+                                }
+                            } else {
+                                navController.navigate(d.route) {
+                                    popUpTo(navController.graph.startDestinationId) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
                             }
                         }
                     )
                 }
             }
         ) { padding ->
-            NavHost(
-                navController = navController,
-                startDestination = Dest.Songs.route,
-                modifier = Modifier.padding(padding)
-            ) {
+            Column(modifier = Modifier.padding(padding)) {
+                AnimatedVisibility(
+                    visible = syncError != null,
+                    enter = slideInVertically() + fadeIn(),
+                    exit = slideOutVertically() + fadeOut()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFE74C3C))
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = syncError ?: "",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+                NavHost(
+                    navController = navController,
+                    startDestination = Dest.Songs.route,
+                    modifier = Modifier.weight(1f)
+                ) {
                 composable(Dest.Songs.route) {
                     SongsListScreen(
                         onOpenSong = {
@@ -175,6 +244,7 @@ fun BandSongbookApp() {
                         onOpenSong = { navController.navigate(Dest.SongViewer.create(it)) }
                     )
                 }
+            }
             }
         }
         }
