@@ -123,7 +123,6 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 10.dp)
                 .padding(bottom = 60.dp),

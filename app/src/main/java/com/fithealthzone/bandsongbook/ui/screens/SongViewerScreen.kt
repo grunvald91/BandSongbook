@@ -464,6 +464,10 @@ fun SongViewerScreen(
                         contentDescription = "Повысить тональность",
                         onClick = { vm.transposeBy(1) }
                     )
+                    val capoValue = song?.capo
+                    if (capoValue != null && capoValue > 0) {
+                        TinyMetaChip("Capo $capoValue")
+                    }
                     StageTextToggleChip(
                         label = if (preferFlats) "♭" else "♯",
                         active = preferFlats,
@@ -478,11 +482,6 @@ fun SongViewerScreen(
                             ?: "C"
                     }
                     KeyBadge(currentKeyLabel)
-                    val capoValue = song?.capo
-                    if (capoValue != null && capoValue > 0) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        TinyMetaChip("Capo $capoValue")
-                    }
                 }
             }
         }
