@@ -2,6 +2,7 @@ package com.fithealthzone.bandsongbook.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +16,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewResponder
+import androidx.compose.foundation.relocation.bringIntoViewResponder
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -35,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -57,6 +61,7 @@ import com.fithealthzone.bandsongbook.ui.viewmodel.SongEditorViewModel
 import kotlin.math.max
 import kotlin.math.min
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
     val vm: SongEditorViewModel = viewModel()
@@ -65,6 +70,7 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
     var lyricsField by remember { mutableStateOf(TextFieldValue(state.lyrics)) }
     var colorPickerExpanded by remember { mutableStateOf(false) }
     var selectedColorHex by remember { mutableStateOf("#00CEC9") }
+    val editorScrollState = rememberScrollState()
 
     LaunchedEffect(songId) { vm.load(songId) }
     LaunchedEffect(state.lyrics) {
@@ -123,7 +129,7 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(editorScrollState)
                 .padding(horizontal = 12.dp, vertical = 10.dp)
                 .padding(bottom = 60.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -180,6 +186,7 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .bringIntoViewResponder(NoParentBringIntoViewResponder)
                             .background(editorHighlightBlockColor(lyricsField), RoundedCornerShape(18.dp))
                             .border(
                                 width = if (hasEditorHighlight) 1.dp else 0.dp,
@@ -338,6 +345,13 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
             }
         }
     }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+private object NoParentBringIntoViewResponder : BringIntoViewResponder {
+    override fun calculateRectForParent(localRect: Rect): Rect = localRect
+
+    override suspend fun bringChildIntoView(localRect: () -> Rect?) = Unit
 }
 
 @Composable

@@ -32,4 +32,19 @@ class SongEditorLayoutRegressionTest {
             manifest.contains("""android:windowSoftInputMode="adjustResize"""")
         )
     }
+
+    @Test
+    fun `lyrics editor swallows cursor bring into view requests before outer scroll`() {
+        val source = Path.of("src/main/java/com/fithealthzone/bandsongbook/ui/screens/SongEditorScreen.kt")
+            .readText()
+
+        assertTrue(
+            "The lyrics field must intercept cursor relocation before it reaches the outer editor scroll.",
+            source.contains(".bringIntoViewResponder(NoParentBringIntoViewResponder)")
+        )
+        assertTrue(
+            "The responder must swallow bring-into-view requests instead of forwarding them to the parent scroll.",
+            source.contains("private object NoParentBringIntoViewResponder")
+        )
+    }
 }
