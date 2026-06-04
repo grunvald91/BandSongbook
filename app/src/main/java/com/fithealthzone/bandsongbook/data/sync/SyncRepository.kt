@@ -37,18 +37,37 @@ class SyncRepository(
         // Вырезаем presigned remoteUrl у серверно-загруженных аудио: эти ссылки
         // короткоживущие и у получателей уже протухают. objectKey+contentHash —
         // канонический указатель, каждый клиент пусть сам резолвит свежую ссылку.
-        val audioDtos = audioDao.getAll().map { entity ->
+        val audioDtos = audioDao.getAllForSync().map { entity ->
             if (!entity.objectKey.isNullOrBlank()) {
                 entity.copy(remoteUrl = null).toDto()
             } else {
                 entity.toDto()
             }
         }
+        // Разделяем песни/сетлисты на «живые» (в основном массиве) и tombstone'ы
+        // (в отдельных массивах deletedSongs/deletedSetlists) — формат, который понимают
+        // веб-клиент и сервер. Soft-deleted ряды локально лежат с deletedAt != null,
+        // но в `songs[]`/`setlists[]` их класть нельзя: остальные клиенты не должны
+        // увидеть «воскрешённую» запись.
+        val allSongs = songDao.getAllForSync()
+        val liveSongs = allSongs.filter { it.deletedAt == null }
+        val deletedSongs = allSongs
+            .filter { it.deletedAt != null }
+            .map { SyncTombstoneDto(id = it.id, deletedAt = it.deletedAt!!, deletedBy = null) }
+
+        val allSetlists = setlistDao.getAllForSync()
+        val liveSetlists = allSetlists.filter { it.deletedAt == null }
+        val deletedSetlists = allSetlists
+            .filter { it.deletedAt != null }
+            .map { SyncTombstoneDto(id = it.id, deletedAt = it.deletedAt!!, deletedBy = null) }
+
         return SyncSnapshotDto(
-            songs = songDao.getAll().map { it.toDto() },
+            songs = liveSongs.map { it.toDto() },
             audio = audioDtos,
-            setlists = setlistDao.getAll().map { it.toDto() },
-            setlistItems = setlistItemDao.getAll().map { it.toDto() },
+            setlists = liveSetlists.map { it.toDto() },
+            setlistItems = setlistItemDao.getAllForSync().map { it.toDto() },
+            deletedSongs = deletedSongs,
+            deletedSetlists = deletedSetlists,
             pushedBy = memberName
         )
     }
@@ -64,15 +83,19 @@ class SyncRepository(
 
     suspend fun importSnapshot(snapshot: SyncSnapshotDto) {
         db.withTransaction {
-            val localSongs = songDao.getAll().associateBy { it.id }
+            val localSongs = songDao.getAllForSync().associateBy { it.id }
             val incomingSongs = snapshot.songs.map { it.toEntity() }
-            val mergedSongs = SyncMerge.mergeSongs(localSongs, incomingSongs)
+            val mergedLiveSongs = SyncMerge.mergeSongs(localSongs, incomingSongs)
+            // Применяем tombstone'ы поверх результата merge — приходящее «удалить» с
+            // более свежим deletedAt должно перебивать локальную живую запись.
+            val mergedSongs = SyncMerge.applySongTombstones(mergedLiveSongs, snapshot.deletedSongs)
 
-            val localSetlists = setlistDao.getAll().associateBy { it.id }
+            val localSetlists = setlistDao.getAllForSync().associateBy { it.id }
             val incomingSetlists = snapshot.setlists.map { it.toEntity() }
-            val mergedSetlists = SyncMerge.mergeSetlists(localSetlists, incomingSetlists)
+            val mergedLiveSetlists = SyncMerge.mergeSetlists(localSetlists, incomingSetlists)
+            val mergedSetlists = SyncMerge.applySetlistTombstones(mergedLiveSetlists, snapshot.deletedSetlists)
 
-            val localAudio = audioDao.getAll().associateBy { it.id }
+            val localAudio = audioDao.getAllForSync().associateBy { it.id }
             val incomingAudio = snapshot.audio.map { it.toEntity() }
             val mergedAudio = SyncMerge.mergeAudio(
                 localAudio,
@@ -80,7 +103,7 @@ class SyncRepository(
                 mergedSongs.map { it.id }.toSet()
             )
 
-            val localItems = setlistItemDao.getAll().associateBy { it.id }
+            val localItems = setlistItemDao.getAllForSync().associateBy { it.id }
             val incomingItems = snapshot.setlistItems.map { it.toEntity() }
             val mergedItems = SyncMerge.mergeSetlistItems(
                 localItems,

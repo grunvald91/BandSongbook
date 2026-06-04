@@ -15,6 +15,9 @@ interface SongDao {
     @Query("SELECT * FROM songs")
     suspend fun getAll(): List<SongEntity>
 
+    @Query("SELECT * FROM songs")
+    suspend fun getAllForSync(): List<SongEntity>
+
     @Query("SELECT * FROM songs WHERE id = :id AND deletedAt IS NULL LIMIT 1")
     fun observeById(id: String): Flow<SongEntity?>
 
@@ -44,6 +47,9 @@ interface SongAudioDao {
 
     @Query("SELECT * FROM song_audio")
     suspend fun getAll(): List<SongAudioEntity>
+
+    @Query("SELECT * FROM song_audio")
+    suspend fun getAllForSync(): List<SongAudioEntity>
 
     @Query("SELECT * FROM song_audio WHERE contentHash = :contentHash AND deletedAt IS NULL LIMIT 1")
     suspend fun getByContentHash(contentHash: String): SongAudioEntity?
@@ -75,6 +81,9 @@ interface SetlistDao {
     @Query("SELECT * FROM setlists")
     suspend fun getAll(): List<SetlistEntity>
 
+    @Query("SELECT * FROM setlists")
+    suspend fun getAllForSync(): List<SetlistEntity>
+
     @Query("SELECT * FROM setlists WHERE id = :id AND deletedAt IS NULL LIMIT 1")
     fun observeById(id: String): Flow<SetlistEntity?>
 
@@ -98,6 +107,9 @@ interface SetlistItemDao {
 
     @Query("SELECT * FROM setlist_items")
     suspend fun getAll(): List<SetlistItemEntity>
+
+    @Query("SELECT * FROM setlist_items")
+    suspend fun getAllForSync(): List<SetlistItemEntity>
 
     @Query("SELECT * FROM setlist_items WHERE setlistId = :setlistId")
     suspend fun getAllBySetlist(setlistId: String): List<SetlistItemEntity>

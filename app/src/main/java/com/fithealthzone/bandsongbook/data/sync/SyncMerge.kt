@@ -155,4 +155,82 @@ internal object SyncMerge {
         if (entity.durationMs != null) score += 1
         return score
     }
+
+    /**
+     * Применяет внешние tombstone-записи к локальному списку песен.
+     *
+     * LWW: если `tombstone.deletedAt` строго больше текущей версии локальной записи
+     * (`max(updatedAt, deletedAt ?: MIN)`), запись помечается удалённой с `deletedAt`
+     * из tombstone. Если локально записи нет совсем — создаётся stub с пустыми полями
+     * и проставленным `deletedAt`, чтобы tombstone дальше уезжал в следующий push и
+     * другие клиенты тоже узнали про удаление.
+     *
+     * Личные настройки (`currentTranspose`, `preferFlats`, `autoScrollSpeed`)
+     * остаются такими же, как были на этом устройстве: визуально это не важно
+     * (строка скрыта `WHERE deletedAt IS NULL` в UI), но так чище.
+     */
+    fun applySongTombstones(
+        songs: List<SongEntity>,
+        tombstones: List<SyncTombstoneDto>
+    ): List<SongEntity> {
+        if (tombstones.isEmpty()) return songs
+        // Если на одну запись пришло несколько tombstone'ов — берём с самым свежим deletedAt.
+        val latest = tombstones
+            .groupBy { it.id }
+            .mapValues { (_, ts) -> ts.maxByOrNull { it.deletedAt }!! }
+        val byId = songs.associateBy { it.id }.toMutableMap()
+        latest.values.forEach { t ->
+            val current = byId[t.id]
+            if (current == null) {
+                byId[t.id] = SongEntity(
+                    id = t.id,
+                    title = "",
+                    artist = null,
+                    originalKey = "C",
+                    currentTranspose = 0,
+                    preferFlats = false,
+                    autoScrollSpeed = 1.0f,
+                    bpm = null,
+                    capo = null,
+                    lyricsWithChords = "",
+                    notes = null,
+                    createdAt = t.deletedAt,
+                    updatedAt = t.deletedAt,
+                    createdBy = t.deletedBy,
+                    deletedAt = t.deletedAt
+                )
+            } else if (t.deletedAt > songVersion(current)) {
+                byId[t.id] = current.copy(deletedAt = t.deletedAt)
+            }
+        }
+        return byId.values.toList()
+    }
+
+    fun applySetlistTombstones(
+        setlists: List<SetlistEntity>,
+        tombstones: List<SyncTombstoneDto>
+    ): List<SetlistEntity> {
+        if (tombstones.isEmpty()) return setlists
+        val latest = tombstones
+            .groupBy { it.id }
+            .mapValues { (_, ts) -> ts.maxByOrNull { it.deletedAt }!! }
+        val byId = setlists.associateBy { it.id }.toMutableMap()
+        latest.values.forEach { t ->
+            val current = byId[t.id]
+            if (current == null) {
+                byId[t.id] = SetlistEntity(
+                    id = t.id,
+                    name = "",
+                    eventDate = null,
+                    notes = null,
+                    createdAt = t.deletedAt,
+                    updatedAt = t.deletedAt,
+                    deletedAt = t.deletedAt
+                )
+            } else if (t.deletedAt > setlistVersion(current)) {
+                byId[t.id] = current.copy(deletedAt = t.deletedAt)
+            }
+        }
+        return byId.values.toList()
+    }
 }
