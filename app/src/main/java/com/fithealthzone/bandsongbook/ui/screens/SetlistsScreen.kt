@@ -16,12 +16,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -48,14 +52,21 @@ import com.fithealthzone.bandsongbook.ui.theme.AppColors
 import com.fithealthzone.bandsongbook.ui.theme.StageIconButton
 import com.fithealthzone.bandsongbook.ui.viewmodel.SetlistsViewModel
 
+@OptIn(ExperimentalMaterialApi::class)
 @Composable
 fun SetlistsScreen(onOpenSetlist: (String) -> Unit) {
     val vm: SetlistsViewModel = viewModel()
     val setlists by vm.setlists.collectAsState()
+    val isRefreshing by vm.isRefreshing.collectAsState()
+    val syncStatus by vm.syncStatus.collectAsState()
 
     var showCreateSheet by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var pendingDeleteSetlistId by remember { mutableStateOf<String?>(null) }
+    val pullRefreshState = rememberPullRefreshState(
+        refreshing = isRefreshing,
+        onRefresh = { vm.refreshFromGroup() }
+    )
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -76,13 +87,14 @@ fun SetlistsScreen(onOpenSetlist: (String) -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .consumeWindowInsets(padding)
+                .pullRefresh(pullRefreshState)
         ) {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 96.dp)
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 72.dp)
             ) {
                 item {
                     Column(
@@ -96,6 +108,17 @@ fun SetlistsScreen(onOpenSetlist: (String) -> Unit) {
                     ) {
                         Text("СЕТЛИСТЫ", color = AppColors.TextWhite, fontSize = 28.sp, fontWeight = FontWeight.Black)
                         Text("${setlists.size} наборов", color = AppColors.TextMuted, fontSize = 12.sp)
+                    }
+                }
+
+                if (!syncStatus.isNullOrBlank()) {
+                    item {
+                        Text(
+                            text = syncStatus.orEmpty(),
+                            color = if (syncStatus?.startsWith("Ошибка") == true) AppColors.Error else AppColors.TextMuted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
                     }
                 }
 
@@ -187,6 +210,14 @@ fun SetlistsScreen(onOpenSetlist: (String) -> Unit) {
                     }
                 }
             }
+
+            PullRefreshIndicator(
+                refreshing = isRefreshing,
+                state = pullRefreshState,
+                modifier = Modifier.align(Alignment.TopCenter),
+                backgroundColor = AppColors.BgCard,
+                contentColor = AppColors.PrimaryLight
+            )
 
             val setlistToDelete = setlists.firstOrNull { it.id == pendingDeleteSetlistId }
             if (setlistToDelete != null) {

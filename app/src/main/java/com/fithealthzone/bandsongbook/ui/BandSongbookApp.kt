@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -32,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -46,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -63,11 +66,12 @@ import com.fithealthzone.bandsongbook.ui.screens.SongViewerScreen
 import com.fithealthzone.bandsongbook.ui.screens.SongsListScreen
 import com.fithealthzone.bandsongbook.ui.theme.AppColors
 import com.fithealthzone.bandsongbook.ui.theme.FrostedBackground
+import com.fithealthzone.bandsongbook.update.AppUpdateHost
 
 private data class NavItem(val dest: Dest, val icon: ImageVector)
 
 @Composable
-fun BandSongbookApp() {
+fun BandSongbookApp(externalUpdateCheckRequest: Int = 0) {
     val context = LocalContext.current
     AppContainer.init(context)
 
@@ -79,8 +83,11 @@ fun BandSongbookApp() {
         NavItem(Dest.Profile, Icons.Default.Person)
     )
     val (isSongFullscreen, setSongFullscreen) = remember { mutableStateOf(false) }
+    var manualUpdateCheckRequest by remember { mutableIntStateOf(0) }
+    var notificationPermissionRequest by remember { mutableIntStateOf(0) }
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
+    val hideBottomBar = currentDestination?.route == Dest.SongViewer.route && isSongFullscreen
     val snackbarHostState = remember { SnackbarHostState() }
     var syncError by remember { mutableStateOf<String?>(null) }
 
@@ -104,6 +111,8 @@ fun BandSongbookApp() {
                 AppContainer.settingsRepository.setLastSyncSuccessEpochMs()
                 syncError = null
             }
+        } catch (error: CancellationException) {
+            throw error
         } catch (e: Exception) {
             syncError = "Сбой синхронизации"
         }
@@ -132,26 +141,18 @@ fun BandSongbookApp() {
                 }
             },
             bottomBar = {
-                if (!isSongFullscreen) {
+                if (!hideBottomBar) {
                     CompactStageBottomBar(
                         items = items,
                         isSelected = { d -> currentDestination?.hierarchy?.any { it.route == d.route } == true },
                         onClick = { d ->
-                            if (d == Dest.Songs) {
-                                navController.navigate(d.route) {
-                                    popUpTo(navController.graph.startDestinationId) {
-                                        saveState = false
-                                        inclusive = true
-                                    }
-                                    launchSingleTop = true
-                                    restoreState = false
+                            navController.navigate(d.route) {
+                                popUpTo(navController.graph.startDestinationId) {
+                                    saveState = false
+                                    inclusive = true
                                 }
-                            } else {
-                                navController.navigate(d.route) {
-                                    popUpTo(navController.graph.startDestinationId) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
+                                launchSingleTop = true
+                                restoreState = false
                             }
                         }
                     )
@@ -196,7 +197,12 @@ fun BandSongbookApp() {
                 composable(Dest.Setlists.route) {
                     SetlistsScreen(onOpenSetlist = { navController.navigate(Dest.SetlistEditor.create(it)) })
                 }
-                composable(Dest.Settings.route) { SettingsScreen() }
+                composable(Dest.Settings.route) {
+                    SettingsScreen(
+                        onCheckUpdates = { manualUpdateCheckRequest += 1 },
+                        onEnableUpdateNotifications = { notificationPermissionRequest += 1 }
+                    )
+                }
                 composable(Dest.Profile.route) {
                     ProfileScreen(onOpenSettings = { navController.navigate(Dest.Settings.route) })
                 }
@@ -249,6 +255,11 @@ fun BandSongbookApp() {
         }
         }
     }
+    AppUpdateHost(
+        manualCheckRequest = manualUpdateCheckRequest,
+        notificationCheckRequest = externalUpdateCheckRequest,
+        notificationPermissionRequest = notificationPermissionRequest
+    )
 }
 
 @Composable
@@ -262,7 +273,8 @@ private fun CompactStageBottomBar(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .navigationBarsPadding()
+            .padding(start = 14.dp, end = 14.dp, bottom = 6.dp)
             .clip(barShape)
             .background(
                 Brush.horizontalGradient(

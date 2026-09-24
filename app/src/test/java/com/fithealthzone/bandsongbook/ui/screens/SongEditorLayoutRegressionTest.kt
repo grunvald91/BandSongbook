@@ -47,4 +47,15 @@ class SongEditorLayoutRegressionTest {
             source.contains("private object NoParentBringIntoViewResponder")
         )
     }
+
+    @Test
+    fun `song editor can attach local files and remote audio urls`() {
+        val source = Path.of("src/main/java/com/fithealthzone/bandsongbook/ui/screens/SongEditorScreen.kt")
+            .readText()
+
+        assertTrue(source.contains("ActivityResultContracts.OpenDocument()"))
+        assertTrue(source.contains("addAudioFromUri"))
+        assertTrue(source.contains("addAudioFromUrl"))
+        assertTrue(source.contains("Прикреплённые дорожки"))
+    }
 }

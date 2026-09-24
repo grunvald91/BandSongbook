@@ -22,16 +22,22 @@ import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SortByAlpha
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,6 +46,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,11 +68,12 @@ fun SongsListScreen(onOpenSong: (String) -> Unit, onCreateSong: () -> Unit) {
     val isRefreshing by vm.isRefreshing.collectAsState()
     val syncStatus by vm.syncStatus.collectAsState()
 
-    var byName by remember { mutableStateOf(true) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var sort by rememberSaveable { mutableStateOf(SongLibrarySort.TITLE) }
     var pendingDeleteSongId by remember { mutableStateOf<String?>(null) }
 
-    val sortedSongs = remember(songs, byName) {
-        if (byName) songs.sortedBy { it.title.lowercase() } else songs.sortedByDescending { it.updatedAt }
+    val visibleSongs = remember(songs, query, sort) {
+        filterAndSortSongs(songs, query, sort)
     }
 
     val pullRefreshState = rememberPullRefreshState(
@@ -97,39 +105,78 @@ fun SongsListScreen(onOpenSong: (String) -> Unit, onCreateSong: () -> Unit) {
                     .fillMaxSize()
                     .padding(horizontal = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 96.dp)
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 72.dp)
             ) {
                 item {
                     StitchSongsHeader(
-                        songsCount = sortedSongs.size,
-                        syncStatus = syncStatus
+                        songsCount = songs.size,
+                        syncStatus = syncStatus,
+                        isRefreshing = isRefreshing,
+                        onRefresh = vm::refreshFromGroup
+                    )
+                }
+
+                item {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("Найти песню или исполнителя") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Search, contentDescription = null)
+                        },
+                        trailingIcon = {
+                            if (query.isNotEmpty()) {
+                                IconButton(onClick = { query = "" }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Очистить поиск")
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = AppColors.TextLight,
+                            unfocusedTextColor = AppColors.TextLight,
+                            focusedPlaceholderColor = AppColors.TextDim,
+                            unfocusedPlaceholderColor = AppColors.TextDim,
+                            focusedBorderColor = AppColors.PrimaryLight,
+                            unfocusedBorderColor = AppColors.BorderGlassStrong,
+                            focusedContainerColor = AppColors.BgCard,
+                            unfocusedContainerColor = AppColors.BgCard,
+                            cursorColor = AppColors.PrimaryLight
+                        )
                     )
                 }
 
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Text(
+                            text = if (query.isBlank()) "${songs.size} песен" else "Найдено: ${visibleSongs.size}",
+                            color = AppColors.TextMuted,
+                            fontSize = 12.sp
+                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             LibraryIconToggle(
                                 icon = Icons.Default.SortByAlpha,
                                 contentDescription = "Сортировать песни по названию",
-                                selected = byName,
-                                onClick = { byName = true }
+                                selected = sort == SongLibrarySort.TITLE,
+                                onClick = { sort = SongLibrarySort.TITLE }
                             )
                             LibraryIconToggle(
                                 icon = Icons.Default.AccessTime,
                                 contentDescription = "Показывать новые песни сверху",
-                                selected = !byName,
-                                onClick = { byName = false }
+                                selected = sort == SongLibrarySort.RECENT,
+                                onClick = { sort = SongLibrarySort.RECENT }
                             )
                         }
                     }
                 }
 
-                if (sortedSongs.isEmpty()) {
+                if (visibleSongs.isEmpty()) {
                     item {
                         Box(
                             modifier = Modifier
@@ -150,13 +197,13 @@ fun SongsListScreen(onOpenSong: (String) -> Unit, onCreateSong: () -> Unit) {
                                     modifier = Modifier.size(56.dp)
                                 )
                                 Text(
-                                    text = "Пока нет песен",
+                                    text = if (query.isBlank()) "Пока нет песен" else "Ничего не найдено",
                                     color = AppColors.TextMuted,
                                     fontSize = 16.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
-                                    text = "Нажми +, чтобы добавить первую",
+                                    text = if (query.isBlank()) "Нажми +, чтобы добавить первую" else "Измени запрос или очисти поиск",
                                     color = AppColors.TextDim,
                                     fontSize = 13.sp
                                 )
@@ -164,7 +211,7 @@ fun SongsListScreen(onOpenSong: (String) -> Unit, onCreateSong: () -> Unit) {
                         }
                     }
                 } else {
-                    itemsIndexed(sortedSongs, key = { _, song -> song.id }) { index, song ->
+                    itemsIndexed(visibleSongs, key = { _, song -> song.id }) { index, song ->
                         val featured = index == 0
                         Row(
                             modifier = Modifier
@@ -272,7 +319,12 @@ fun SongsListScreen(onOpenSong: (String) -> Unit, onCreateSong: () -> Unit) {
 }
 
 @Composable
-private fun StitchSongsHeader(songsCount: Int, syncStatus: String?) {
+private fun StitchSongsHeader(
+    songsCount: Int,
+    syncStatus: String?,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -292,14 +344,29 @@ private fun StitchSongsHeader(songsCount: Int, syncStatus: String?) {
                 Text("БИБЛИОТЕКА", color = AppColors.TextWhite, fontSize = 28.sp, fontWeight = FontWeight.Black)
                 Text("$songsCount треков", color = AppColors.TextMuted, fontSize = 12.sp)
             }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(AppColors.BgSurface, RoundedCornerShape(14.dp))
-                    .border(1.dp, AppColors.BorderGlass, RoundedCornerShape(14.dp)),
-                contentAlignment = Alignment.Center
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.GraphicEq, contentDescription = "Индикатор библиотеки", tint = AppColors.PrimaryLight)
+                StageIconButton(
+                    icon = Icons.Default.Sync,
+                    contentDescription = if (isRefreshing) "Синхронизация выполняется" else "Синхронизировать библиотеку",
+                    active = isRefreshing,
+                    enabled = !isRefreshing,
+                    tint = AppColors.PrimaryLight,
+                    backgroundColor = AppColors.BgSurface,
+                    borderColor = AppColors.BorderGlass,
+                    onClick = onRefresh
+                )
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(AppColors.BgSurface, RoundedCornerShape(14.dp))
+                        .border(1.dp, AppColors.BorderGlass, RoundedCornerShape(14.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.GraphicEq, contentDescription = "Индикатор библиотеки", tint = AppColors.PrimaryLight)
+                }
             }
         }
 

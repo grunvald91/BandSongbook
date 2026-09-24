@@ -12,6 +12,9 @@ import com.fithealthzone.bandsongbook.data.local.SongAudioDao
 import com.fithealthzone.bandsongbook.data.local.SongAudioEntity
 import com.fithealthzone.bandsongbook.data.local.SongDao
 import com.fithealthzone.bandsongbook.data.local.SongEntity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 
 class SyncRepository(
@@ -27,52 +30,90 @@ class SyncRepository(
     }
 
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
+    private val snapshotMutex = Mutex()
 
     data class RemoteAudioRef(
         val objectKey: String,
         val remoteUrl: String?
     )
 
-    suspend fun exportSnapshot(memberName: String): SyncSnapshotDto {
+    suspend fun exportSnapshot(memberName: String): SyncSnapshotDto =
+        snapshotMutex.withLock { exportSnapshotUnlocked(memberName) }
+
+    private suspend fun exportSnapshotUnlocked(memberName: String): SyncSnapshotDto {
         // Вырезаем presigned remoteUrl у серверно-загруженных аудио: эти ссылки
         // короткоживущие и у получателей уже протухают. objectKey+contentHash —
         // канонический указатель, каждый клиент пусть сам резолвит свежую ссылку.
-        val audioDtos = audioDao.getAll().map { entity ->
+        val audioDtos = audioDao.getAllForSync().map { entity ->
             if (!entity.objectKey.isNullOrBlank()) {
                 entity.copy(remoteUrl = null).toDto()
             } else {
                 entity.toDto()
             }
         }
+        // Разделяем песни/сетлисты на «живые» (в основном массиве) и tombstone'ы
+        // (в отдельных массивах deletedSongs/deletedSetlists) — формат, который понимают
+        // веб-клиент и сервер. Soft-deleted ряды локально лежат с deletedAt != null,
+        // но в `songs[]`/`setlists[]` их класть нельзя: остальные клиенты не должны
+        // увидеть «воскрешённую» запись.
+        val allSongs = songDao.getAllForSync()
+        val liveSongs = allSongs.filter { it.deletedAt == null }
+        val deletedSongs = allSongs
+            .filter { it.deletedAt != null }
+            .map { SyncTombstoneDto(id = it.id, deletedAt = it.deletedAt!!, deletedBy = null) }
+
+        val allSetlists = setlistDao.getAllForSync()
+        val liveSetlists = allSetlists.filter { it.deletedAt == null }
+        val deletedSetlists = allSetlists
+            .filter { it.deletedAt != null }
+            .map { SyncTombstoneDto(id = it.id, deletedAt = it.deletedAt!!, deletedBy = null) }
+
         return SyncSnapshotDto(
-            songs = songDao.getAll().map { it.toDto() },
+            songs = liveSongs.map { it.toDto() },
             audio = audioDtos,
-            setlists = setlistDao.getAll().map { it.toDto() },
-            setlistItems = setlistItemDao.getAll().map { it.toDto() },
+            setlists = liveSetlists.map { it.toDto() },
+            setlistItems = setlistItemDao.getAllForSync().map { it.toDto() },
+            deletedSongs = deletedSongs,
+            deletedSetlists = deletedSetlists,
             pushedBy = memberName
         )
     }
 
     suspend fun exportSnapshotJson(memberName: String): String {
-        return json.encodeToString(SyncSnapshotDto.serializer(), exportSnapshot(memberName))
+        return snapshotMutex.withLock {
+            json.encodeToString(SyncSnapshotDto.serializer(), exportSnapshotUnlocked(memberName))
+        }
     }
 
     suspend fun importSnapshotJson(raw: String) {
         val snapshot = json.decodeFromString(SyncSnapshotDto.serializer(), raw)
-        importSnapshot(snapshot)
+        snapshotMutex.withLock { importSnapshotUnlocked(snapshot) }
     }
 
     suspend fun importSnapshot(snapshot: SyncSnapshotDto) {
+        snapshotMutex.withLock { importSnapshotUnlocked(snapshot) }
+    }
+
+    private suspend fun importSnapshotUnlocked(snapshot: SyncSnapshotDto) {
         db.withTransaction {
-            val localSongs = songDao.getAll().associateBy { it.id }
+            importSnapshotRowsUnlocked(snapshot)
+        }
+    }
+
+    private suspend fun importSnapshotRowsUnlocked(snapshot: SyncSnapshotDto) {
+        val localSongs = songDao.getAllForSync().associateBy { it.id }
             val incomingSongs = snapshot.songs.map { it.toEntity() }
-            val mergedSongs = SyncMerge.mergeSongs(localSongs, incomingSongs)
+            val mergedLiveSongs = SyncMerge.mergeSongs(localSongs, incomingSongs)
+            // Применяем tombstone'ы поверх результата merge — приходящее «удалить» с
+            // более свежим deletedAt должно перебивать локальную живую запись.
+            val mergedSongs = SyncMerge.applySongTombstones(mergedLiveSongs, snapshot.deletedSongs)
 
-            val localSetlists = setlistDao.getAll().associateBy { it.id }
+            val localSetlists = setlistDao.getAllForSync().associateBy { it.id }
             val incomingSetlists = snapshot.setlists.map { it.toEntity() }
-            val mergedSetlists = SyncMerge.mergeSetlists(localSetlists, incomingSetlists)
+            val mergedLiveSetlists = SyncMerge.mergeSetlists(localSetlists, incomingSetlists)
+            val mergedSetlists = SyncMerge.applySetlistTombstones(mergedLiveSetlists, snapshot.deletedSetlists)
 
-            val localAudio = audioDao.getAll().associateBy { it.id }
+            val localAudio = audioDao.getAllForSync().associateBy { it.id }
             val incomingAudio = snapshot.audio.map { it.toEntity() }
             val mergedAudio = SyncMerge.mergeAudio(
                 localAudio,
@@ -80,7 +121,7 @@ class SyncRepository(
                 mergedSongs.map { it.id }.toSet()
             )
 
-            val localItems = setlistItemDao.getAll().associateBy { it.id }
+            val localItems = setlistItemDao.getAllForSync().associateBy { it.id }
             val incomingItems = snapshot.setlistItems.map { it.toEntity() }
             val mergedItems = SyncMerge.mergeSetlistItems(
                 localItems,
@@ -93,43 +134,82 @@ class SyncRepository(
             setlistDao.upsertAll(mergedSetlists)
             audioDao.upsertAll(mergedAudio)
             setlistItemDao.upsertAll(mergedItems)
+    }
+
+    suspend fun activateFromRemote(
+        baseUrl: String,
+        groupCode: String,
+        authToken: String,
+        replaceLocalLibrary: Boolean
+    ): SyncSnapshotDto = snapshotMutex.withLock {
+        // Fetch and validate the remote group before deleting any local rows. The
+        // same mutex then keeps activation atomic with all other snapshot work.
+        val snapshot = api.pull(baseUrl, groupCode, authToken)
+        if (replaceLocalLibrary) {
+            db.withTransaction {
+                setlistItemDao.clearAll()
+                audioDao.clearAll()
+                setlistDao.clearAll()
+                songDao.clearAll()
+                importSnapshotRowsUnlocked(snapshot)
+            }
+        } else {
+            importSnapshotUnlocked(snapshot)
         }
+        snapshot
     }
 
     suspend fun push(baseUrl: String, groupCode: String, authToken: String, memberName: String) {
-        backfillMissingRemoteAudio(
+        snapshotMutex.withLock { pushUnlocked(baseUrl, groupCode, authToken, memberName) }
+    }
+
+    private suspend fun pushUnlocked(baseUrl: String, groupCode: String, authToken: String, memberName: String) {
+        backfillMissingRemoteAudioUnlocked(
             baseUrl = baseUrl,
             groupCode = groupCode,
             authToken = authToken,
             memberName = memberName
         )
-        val snapshot = exportSnapshot(memberName)
+        val snapshot = exportSnapshotUnlocked(memberName)
         api.push(baseUrl, groupCode, authToken, snapshot)
     }
 
-    suspend fun pull(baseUrl: String, groupCode: String, authToken: String, memberName: String = ""): SyncSnapshotDto {
+    suspend fun pull(baseUrl: String, groupCode: String, authToken: String, memberName: String = ""): SyncSnapshotDto =
+        snapshotMutex.withLock { pullUnlocked(baseUrl, groupCode, authToken, memberName) }
+
+    private suspend fun pullUnlocked(
+        baseUrl: String,
+        groupCode: String,
+        authToken: String,
+        memberName: String
+    ): SyncSnapshotDto {
         val snapshot = api.pull(baseUrl, groupCode, authToken)
-        importSnapshot(snapshot)
+        importSnapshotUnlocked(snapshot)
         // Если на устройстве остались локально добавленные аудио без objectKey
         // (не загрузились при добавлении, например, из-за отсутствия сети) — тихо
         // пробуем залить их на сервер прямо здесь, чтобы другие участники увидели
         // файл уже при следующем pull.
-        runCatching {
-            backfillMissingRemoteAudio(
+        try {
+            backfillMissingRemoteAudioUnlocked(
                 baseUrl = baseUrl,
                 groupCode = groupCode,
                 authToken = authToken,
                 memberName = memberName.ifBlank { "Неизвестно" }
             )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            // Backfill is best-effort; the pulled snapshot is already imported.
         }
         return snapshot
     }
 
-    suspend fun roundTrip(baseUrl: String, groupCode: String, authToken: String, memberName: String): SyncSnapshotDto {
-        val snapshot = pull(baseUrl, groupCode, authToken, memberName)
-        push(baseUrl, groupCode, authToken, memberName)
-        return snapshot
-    }
+    suspend fun roundTrip(baseUrl: String, groupCode: String, authToken: String, memberName: String): SyncSnapshotDto =
+        snapshotMutex.withLock {
+            val snapshot = pullUnlocked(baseUrl, groupCode, authToken, memberName)
+            pushUnlocked(baseUrl, groupCode, authToken, memberName)
+            snapshot
+        }
 
     suspend fun fetchGroupMeta(baseUrl: String, groupCode: String, authToken: String): SyncMetaDto {
         return api.meta(baseUrl, groupCode, authToken)
@@ -247,7 +327,7 @@ class SyncRepository(
         return RemoteAudioRef(objectKey = confirmed.objectKey, remoteUrl = remoteUrl)
     }
 
-    suspend fun backfillMissingRemoteAudio(
+    private suspend fun backfillMissingRemoteAudioUnlocked(
         baseUrl: String,
         groupCode: String,
         authToken: String,
@@ -269,7 +349,7 @@ class SyncRepository(
                 }
             }.getOrNull() ?: return@forEach
 
-            val remoteRef = runCatching {
+            val remoteRef = try {
                 resolveRemoteAudio(
                     baseUrl = baseUrl,
                     groupCode = groupCode,
@@ -283,7 +363,11 @@ class SyncRepository(
                     fileName = entity.title,
                     fileBytes = fileBytes
                 )
-            }.getOrNull() ?: return@forEach
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                null
+            } ?: return@forEach
 
             audioDao.insert(
                 entity.copy(

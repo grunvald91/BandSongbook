@@ -66,11 +66,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import com.fithealthzone.bandsongbook.AppContainer
 import com.fithealthzone.bandsongbook.data.local.SongAudioEntity
-import com.fithealthzone.bandsongbook.media.AudioPlaybackCache
+import com.fithealthzone.bandsongbook.media.AudioCacheKey
+import com.fithealthzone.bandsongbook.media.rememberPlaybackController
+import com.fithealthzone.bandsongbook.media.PlaybackMediaId
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlin.coroutines.coroutineContext
 import kotlin.math.roundToInt
 import com.fithealthzone.bandsongbook.ui.theme.AppColors
 import com.fithealthzone.bandsongbook.ui.theme.KeyBadge
@@ -83,11 +89,14 @@ import com.fithealthzone.bandsongbook.ui.viewmodel.SetlistEditorUi
 import com.fithealthzone.bandsongbook.ui.viewmodel.SetlistEditorViewModel
 
 private data class OrderedTrack(
+    val setlistItemId: String,
     val track: SongAudioEntity,
     val songTitle: String,
     val remoteUri: String?,
     val localUri: String?
 ) {
+    val mediaId: String get() = PlaybackMediaId.forSetlistItem(setlistItemId, track.id)
+
     fun preferredUri(): String? = remoteUri ?: localUri
 
     fun sourceBadge(): TrackSourceBadge {
@@ -104,6 +113,25 @@ private data class TrackSourceBadge(
     val icon: ImageVector
 )
 
+internal class PlaylistBuildGuard {
+    private var generation: Long = 0L
+
+    @Synchronized
+    fun begin(): Long {
+        generation += 1L
+        return generation
+    }
+
+    @Synchronized
+    fun invalidate() {
+        generation += 1L
+    }
+
+    @Synchronized
+    fun isCurrent(token: Long): Boolean = token == generation
+}
+
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 @Composable
 fun SetlistEditorScreen(setlistId: String, onOpenSong: (String) -> Unit = {}) {
     val vm: SetlistEditorViewModel = viewModel(factory = SetlistEditorFactory(setlistId))
@@ -118,10 +146,17 @@ fun SetlistEditorScreen(setlistId: String, onOpenSong: (String) -> Unit = {}) {
     var pendingSelection by remember { mutableStateOf(selectedSongIds) }
 
     val orderedTracks = remember(ui.items, ui.songs, ui.audioBySongId) { buildOrderedTracks(ui) }
+    var excludedTrackIds by remember(setlistId) { mutableStateOf(emptySet<String>()) }
+    val orderedTrackIds = remember(orderedTracks) { orderedTracks.map { it.mediaId }.toSet() }
+    LaunchedEffect(orderedTrackIds) {
+        excludedTrackIds = excludedTrackIds.intersect(orderedTrackIds)
+    }
+    val selectedTracks = orderedTracks.filterNot { it.mediaId in excludedTrackIds }
+    val selectedQueueIds = selectedTracks.map { it.mediaId }
 
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    val player = remember { AudioPlaybackCache.buildPlayer(context) }
+    val player = rememberPlaybackController()
     var isPlaying by remember { mutableStateOf(false) }
     var currentTrackId by remember { mutableStateOf<String?>(null) }
     var playbackPositionMs by remember { mutableStateOf(0L) }
@@ -130,34 +165,81 @@ fun SetlistEditorScreen(setlistId: String, onOpenSong: (String) -> Unit = {}) {
     var loopAll by remember { mutableStateOf(false) }
     var canSkipPrevious by remember { mutableStateOf(false) }
     var canSkipNext by remember { mutableStateOf(false) }
+    var playlistBuildJob by remember(setlistId) { mutableStateOf<Job?>(null) }
+    val playlistBuildGuard = remember(setlistId) { PlaylistBuildGuard() }
     val playerReservedSpace = if (showPlayer) playerSheetHeight else 0.dp
 
-    fun applyRepeat() {
-        player.repeatMode = when {
-            loopOne -> Player.REPEAT_MODE_ONE
-            loopAll -> Player.REPEAT_MODE_ALL
-            else -> Player.REPEAT_MODE_OFF
-        }
+    fun clearLoadedPlaylist() {
+        playlistBuildGuard.invalidate()
+        playlistBuildJob?.cancel()
+        playlistBuildJob = null
+        player?.stop()
+        player?.clearMediaItems()
+        currentTrackId = null
+        playbackPositionMs = 0L
+        playbackDurationMs = 0L
     }
 
     fun startPlaylist(fromTrackId: String? = null) {
-        scope.launch {
-            val queue = orderedTracks.mapNotNull { track ->
+        playlistBuildJob?.cancel()
+        val buildToken = playlistBuildGuard.begin()
+        playlistBuildJob = scope.launch {
+            val connectedPlayer = player ?: return@launch
+            val queue = selectedTracks.mapNotNull { track ->
                 val uri = vm.resolvePlaybackUri(context, track.track) ?: return@mapNotNull null
-                MediaItem.Builder().setMediaId(track.track.id).setUri(uri).build()
+                MediaItem.Builder()
+                    .setMediaId(track.mediaId)
+                    .setUri(uri)
+                    .setCustomCacheKey(AudioCacheKey.forAttachment(track.track))
+                    .setMediaMetadata(
+                        MediaMetadata.Builder()
+                            .setTitle(track.track.title)
+                            .setArtist(track.songTitle)
+                            .build()
+                    )
+                    .build()
             }
+            coroutineContext.ensureActive()
+            if (!playlistBuildGuard.isCurrent(buildToken)) return@launch
             if (queue.isEmpty()) return@launch
             val startIndex = if (fromTrackId == null) 0 else queue.indexOfFirst { it.mediaId == fromTrackId }.coerceAtLeast(0)
-            player.setMediaItems(queue, startIndex, 0L)
-            player.prepare()
-            player.playWhenReady = true
+            connectedPlayer.setMediaItems(queue, startIndex, 0L)
+            connectedPlayer.prepare()
+            connectedPlayer.playWhenReady = true
         }
     }
 
-    DisposableEffect(player) {
+    LaunchedEffect(player, selectedQueueIds) {
+        playlistBuildGuard.invalidate()
+        playlistBuildJob?.cancel()
+        val connectedPlayer = player ?: return@LaunchedEffect
+        val loadedQueueIds = List(connectedPlayer.mediaItemCount) { index ->
+            connectedPlayer.getMediaItemAt(index).mediaId
+        }
+        if (loadedQueueIds.isNotEmpty() && loadedQueueIds != selectedQueueIds) {
+            connectedPlayer.stop()
+            connectedPlayer.clearMediaItems()
+            currentTrackId = null
+            playbackPositionMs = 0L
+            playbackDurationMs = 0L
+        }
+    }
+
+    DisposableEffect(player, orderedTracks) {
+        val connectedPlayer = player
+        if (connectedPlayer == null) {
+            return@DisposableEffect onDispose { }
+        }
         fun syncPlayerNavigationState() {
-            canSkipPrevious = player.hasPreviousMediaItem()
-            canSkipNext = player.hasNextMediaItem()
+            canSkipPrevious = connectedPlayer.hasPreviousMediaItem()
+            canSkipNext = connectedPlayer.hasNextMediaItem()
+        }
+        fun displayMediaId(mediaId: String?): String? {
+            if (mediaId == null) return null
+            val audioId = PlaybackMediaId.audioId(mediaId)
+            return orderedTracks.firstOrNull {
+                it.mediaId == mediaId || it.track.id == audioId
+            }?.mediaId
         }
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
@@ -166,30 +248,42 @@ fun SetlistEditorScreen(setlistId: String, onOpenSong: (String) -> Unit = {}) {
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                currentTrackId = mediaItem?.mediaId
+                currentTrackId = displayMediaId(mediaItem?.mediaId)
                 playbackPositionMs = 0L
-                playbackDurationMs = player.duration.coerceAtLeast(0L)
+                playbackDurationMs = connectedPlayer.duration.coerceAtLeast(0L)
                 syncPlayerNavigationState()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
-                playbackDurationMs = player.duration.coerceAtLeast(0L)
+                playbackDurationMs = connectedPlayer.duration.coerceAtLeast(0L)
                 syncPlayerNavigationState()
             }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                loopOne = repeatMode == Player.REPEAT_MODE_ONE
+                loopAll = repeatMode == Player.REPEAT_MODE_ALL
+            }
         }
-        player.addListener(listener)
+        currentTrackId = displayMediaId(connectedPlayer.currentMediaItem?.mediaId)
+        isPlaying = connectedPlayer.isPlaying
+        playbackPositionMs = connectedPlayer.currentPosition.coerceAtLeast(0L)
+        playbackDurationMs = connectedPlayer.duration.takeIf { it > 0 } ?: 0L
+        loopOne = connectedPlayer.repeatMode == Player.REPEAT_MODE_ONE
+        loopAll = connectedPlayer.repeatMode == Player.REPEAT_MODE_ALL
+        syncPlayerNavigationState()
+        connectedPlayer.addListener(listener)
         onDispose {
-            player.removeListener(listener)
-            player.release()
+            connectedPlayer.removeListener(listener)
         }
     }
 
-    LaunchedEffect(loopOne, loopAll) { applyRepeat() }
+
     LaunchedEffect(selectedSongIds, editMode) { if (!editMode) pendingSelection = selectedSongIds }
-    LaunchedEffect(currentTrackId, isPlaying) {
+    LaunchedEffect(currentTrackId, isPlaying, player) {
         while (currentTrackId != null) {
-            playbackPositionMs = player.currentPosition.coerceAtLeast(0L)
-            playbackDurationMs = player.duration.takeIf { it > 0 } ?: 0L
+            val connectedPlayer = player ?: break
+            playbackPositionMs = connectedPlayer.currentPosition.coerceAtLeast(0L)
+            playbackDurationMs = connectedPlayer.duration.takeIf { it > 0 } ?: 0L
             kotlinx.coroutines.delay(if (isPlaying) 250 else 500)
         }
     }
@@ -378,46 +472,63 @@ fun SetlistEditorScreen(setlistId: String, onOpenSong: (String) -> Unit = {}) {
                 expanded = playerExpanded,
                 onExpandedChange = { playerExpanded = it },
                 onPlayPause = {
+                    val connectedPlayer = player
                     if (isPlaying) {
-                        player.pause()
-                    } else if (player.mediaItemCount > 0) {
-                        player.play()
+                        connectedPlayer?.pause()
+                    } else if (connectedPlayer != null && connectedPlayer.mediaItemCount > 0) {
+                        connectedPlayer.play()
                     } else {
                         startPlaylist()
                     }
                 },
-                onStop = {
-                    player.stop()
-                    player.clearMediaItems()
-                    currentTrackId = null
-                    playbackPositionMs = 0L
-                    playbackDurationMs = 0L
-                },
+                onStop = { clearLoadedPlaylist() },
                 onToggleLoopAll = {
-                    loopAll = !loopAll
-                    if (loopAll) loopOne = false
+                    val enabled = !loopAll
+                    loopAll = enabled
+                    loopOne = false
+                    player?.repeatMode = if (enabled) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
+                    if (enabled && player?.mediaItemCount != selectedTracks.size) {
+                        startPlaylist(currentTrackId)
+                    }
                 },
                 onToggleLoopOne = {
-                    loopOne = !loopOne
-                    if (loopOne) loopAll = false
+                    val enabled = !loopOne
+                    loopOne = enabled
+                    loopAll = false
+                    player?.repeatMode = if (enabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
                 },
                 onPrevious = {
-                    if (player.hasPreviousMediaItem()) {
-                        player.seekToPreviousMediaItem()
-                        player.playWhenReady = true
+                    val connectedPlayer = player
+                    if (connectedPlayer != null && connectedPlayer.hasPreviousMediaItem()) {
+                        connectedPlayer.seekToPreviousMediaItem()
+                        connectedPlayer.playWhenReady = true
                     }
                 },
                 onNext = {
-                    if (player.hasNextMediaItem()) {
-                        player.seekToNextMediaItem()
-                        player.playWhenReady = true
+                    val connectedPlayer = player
+                    if (connectedPlayer != null && connectedPlayer.hasNextMediaItem()) {
+                        connectedPlayer.seekToNextMediaItem()
+                        connectedPlayer.playWhenReady = true
                     }
                 },
                 onPlayTrack = { trackId -> startPlaylist(fromTrackId = trackId) },
+                selectedTrackIds = selectedTracks.map { it.mediaId }.toSet(),
+                onTrackSelectionChange = { trackId, selected ->
+                    clearLoadedPlaylist()
+                    excludedTrackIds = if (selected) excludedTrackIds - trackId else excludedTrackIds + trackId
+                },
+                onSelectAllTracks = {
+                    clearLoadedPlaylist()
+                    excludedTrackIds = emptySet()
+                },
+                onClearTrackSelection = {
+                    clearLoadedPlaylist()
+                    excludedTrackIds = orderedTrackIds
+                },
                 onSeek = { fraction ->
                     val duration = playbackDurationMs.takeIf { it > 0 } ?: return@BottomPlayerSheet
-                    player.seekTo((duration * fraction).toLong().coerceIn(0L, duration))
-                    playbackPositionMs = player.currentPosition.coerceAtLeast(0L)
+                    player?.seekTo((duration * fraction).toLong().coerceIn(0L, duration))
+                    playbackPositionMs = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
                 },
                 onHeightChange = { playerSheetHeight = it }
             )
@@ -508,6 +619,10 @@ private fun BottomPlayerSheet(
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onPlayTrack: (String) -> Unit,
+    selectedTrackIds: Set<String>,
+    onTrackSelectionChange: (String, Boolean) -> Unit,
+    onSelectAllTracks: () -> Unit,
+    onClearTrackSelection: () -> Unit,
     onSeek: (Float) -> Unit,
     onHeightChange: (androidx.compose.ui.unit.Dp) -> Unit
 ) {
@@ -532,8 +647,11 @@ private fun BottomPlayerSheet(
     val panelHeight = with(density) { panelHeightPx.value.toDp() }
     val contentRevealThreshold = collapsedHeight + 36.dp
     val showExpandedContent = panelHeight > contentRevealThreshold
-    val currentTrack = remember(currentTrackId, orderedTracks) { orderedTracks.firstOrNull { it.track.id == currentTrackId } }
-    val currentIndex = orderedTracks.indexOfFirst { it.track.id == currentTrackId }.takeIf { it >= 0 }
+    val currentTrack = remember(currentTrackId, orderedTracks) { orderedTracks.firstOrNull { it.mediaId == currentTrackId } }
+    val currentIndex = orderedTracks
+        .filter { it.mediaId in selectedTrackIds }
+        .indexOfFirst { it.mediaId == currentTrackId }
+        .takeIf { it >= 0 }
     val repeatIcon = when {
         loopOne -> Icons.Default.RepeatOne
         else -> Icons.Default.Repeat
@@ -636,7 +754,7 @@ private fun BottomPlayerSheet(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 MetaBadge("Сейчас играет")
-                                currentIndex?.let { index -> MetaBadge("${index + 1}/${orderedTracks.size}") }
+                                currentIndex?.let { index -> MetaBadge("${index + 1}/${selectedTrackIds.size}") }
                                 TrackSourcePill(
                                     label = currentTrack.sourceBadge().label,
                                     icon = currentTrack.sourceBadge().icon,
@@ -693,6 +811,7 @@ private fun BottomPlayerSheet(
                             icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = if (isPlaying) "Пауза" else "Воспроизвести",
                             prominent = true,
+                            enabled = selectedTrackIds.isNotEmpty(),
                             onClick = onPlayPause
                         )
                         PlayerTransportButton(
@@ -730,8 +849,28 @@ private fun BottomPlayerSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Очередь", color = AppColors.TextWhite, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    PlayerMiniStatPill(text = "${orderedTracks.size} треков")
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Очередь", color = AppColors.TextWhite, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = "Выбрано: ${selectedTrackIds.size}/${orderedTracks.size}",
+                            color = AppColors.TextMuted,
+                            fontSize = 10.sp
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StageTextToggleChip(
+                            label = "Все",
+                            active = selectedTrackIds.size == orderedTracks.size && orderedTracks.isNotEmpty(),
+                            buttonSize = 38.dp,
+                            onClick = onSelectAllTracks
+                        )
+                        StageTextToggleChip(
+                            label = "Нет",
+                            active = selectedTrackIds.isEmpty(),
+                            buttonSize = 38.dp,
+                            onClick = onClearTrackSelection
+                        )
+                    }
                 }
 
                 if (orderedTracks.isEmpty()) {
@@ -752,9 +891,10 @@ private fun BottomPlayerSheet(
                             .weight(1f),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        items(orderedTracks, key = { it.track.id }) { track ->
+                        items(orderedTracks, key = { it.mediaId }) { track ->
                             val sourceBadge = track.sourceBadge()
-                            val isCurrent = currentTrackId == track.track.id
+                            val isCurrent = currentTrackId == track.mediaId
+                            val isSelected = track.mediaId in selectedTrackIds
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -774,12 +914,19 @@ private fun BottomPlayerSheet(
                                             color = AppColors.Primary.copy(alpha = 0.20f),
                                             radius = 140.dp
                                         ),
-                                        onClick = { onPlayTrack(track.track.id) }
+                                        onClick = {
+                                            if (isSelected) onPlayTrack(track.mediaId)
+                                            else onTrackSelectionChange(track.mediaId, true)
+                                        }
                                     )
                                     .padding(horizontal = 10.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
+                                TrackSelectionPill(
+                                    checked = isSelected,
+                                    onClick = { onTrackSelectionChange(track.mediaId, !isSelected) }
+                                )
                                 Box(
                                     modifier = Modifier
                                         .size(36.dp)
@@ -824,6 +971,35 @@ private fun BottomPlayerSheet(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun TrackSelectionPill(
+    checked: Boolean,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .background(if (checked) AppColors.Primary.copy(alpha = 0.22f) else AppColors.BgSurface, CircleShape)
+            .border(1.dp, if (checked) AppColors.PrimaryLight else AppColors.BorderGlassStrong, CircleShape)
+            .clickable(
+                interactionSource = interaction,
+                indication = rememberRipple(bounded = true, radius = 18.dp),
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        if (checked) {
+            Icon(
+                Icons.Default.Check,
+                contentDescription = "Дорожка выбрана",
+                tint = AppColors.PrimaryLight,
+                modifier = Modifier.size(13.dp)
+            )
         }
     }
 }
@@ -993,6 +1169,7 @@ private fun buildOrderedTracks(ui: SetlistEditorUi): List<OrderedTrack> {
         val tracks = ui.audioBySongId[item.songId].orEmpty().sortedBy { it.addedAt }
         tracks.forEach { track ->
             out += OrderedTrack(
+                setlistItemId = item.id,
                 track = track,
                 songTitle = songTitle,
                 remoteUri = track.remoteUrl?.takeIf { it.isNotBlank() },

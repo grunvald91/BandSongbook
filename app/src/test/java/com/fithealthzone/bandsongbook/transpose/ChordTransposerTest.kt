@@ -128,16 +128,42 @@ class ChordTransposerTest {
     }
 
     @Test
+    fun `bracketed section labels are not corrupted by transposition`() {
+        val source = "[Chorus]\n[Bridge]\n[C]"
+        assertEquals("[Chorus]\n[Bridge]\n[D]", ChordTransposer.transposeLyrics(source, 2, preferFlats = false))
+    }
+
+    @Test
+    fun `website enharmonic roots transpose like the website`() {
+        assertEquals("C", ChordTransposer.transposeChord("Cb", 1, preferFlats = false))
+        assertEquals("C#", ChordTransposer.transposeChord("B#", 1, preferFlats = false))
+        assertEquals("F#", ChordTransposer.transposeChord("E#", 1, preferFlats = false))
+        assertEquals("F", ChordTransposer.transposeChord("Fb", 1, preferFlats = false))
+    }
+
+    @Test
     fun `transposeLyrics with zero semitones is identity`() {
         val source = "[Am]первая [F]вторая [C]третья [G]четвёртая"
         assertEquals(source, ChordTransposer.transposeLyrics(source, 0, preferFlats = false))
+    }
+
+    @Test
+    fun `german H chord from website is equivalent to B`() {
+        assertEquals("C#", ChordTransposer.transposeChord("H", 2, preferFlats = false))
+    }
+
+    @Test
+    fun `unwrapped website chord line is detected for android rendering`() {
+        assertEquals("[Am] [D7]\nСтрока песни", ChordDetector.autoWrapChords("Am D7\nСтрока песни"))
+        assertEquals("[H]", ChordDetector.autoWrapChords("H"))
+        assertEquals("[Cmaj9#11] [G7sus4]", ChordDetector.autoWrapChords("Cmaj9#11 G7sus4"))
+        assertEquals("<mark>[Am] [D]</mark>", ChordDetector.autoWrapChords("<mark>Am D</mark>"))
     }
 
     // --- Некорректный вход возвращается как есть ---
 
     @Test
     fun `unrecognized token is returned unchanged`() {
-        // "H" не входит в A..G; регулярка первой же проверкой вернёт null → возврат исходного
-        assertEquals("H", ChordTransposer.transposeChord("H", 2, preferFlats = false))
+        assertEquals("Q", ChordTransposer.transposeChord("Q", 2, preferFlats = false))
     }
 }

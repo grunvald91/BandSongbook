@@ -10,12 +10,21 @@ import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import com.fithealthzone.bandsongbook.data.local.SongAudioEntity
 import java.io.File
 
 private const val AUDIO_CACHE_DIR = "audio_stream_cache"
 private const val AUDIO_CACHE_BYTES = 500L * 1024L * 1024L
 
-@UnstableApi
+object AudioCacheKey {
+    fun forAttachment(audio: SongAudioEntity): String = when {
+        !audio.contentHash.isNullOrBlank() -> "song-audio:sha256:${audio.contentHash}"
+        !audio.objectKey.isNullOrBlank() -> "song-audio:object:${audio.objectKey}"
+        else -> "song-audio:id:${audio.id}"
+    }
+}
+
+@androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 object AudioPlaybackCache {
     @Volatile
     private var cache: SimpleCache? = null

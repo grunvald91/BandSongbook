@@ -70,11 +70,20 @@ data class GroupMemberDto(
 )
 
 @Serializable
+data class SyncTombstoneDto(
+    val id: String,
+    val deletedAt: Long,
+    val deletedBy: String? = null
+)
+
+@Serializable
 data class SyncSnapshotDto(
     val songs: List<SongDto> = emptyList(),
     val audio: List<SongAudioDto> = emptyList(),
     val setlists: List<SetlistDto> = emptyList(),
     val setlistItems: List<SetlistItemDto> = emptyList(),
+    val deletedSongs: List<SyncTombstoneDto> = emptyList(),
+    val deletedSetlists: List<SyncTombstoneDto> = emptyList(),
     val pushedBy: String = "",
     val lastPushedBy: String = "",
     val serverUpdatedAt: Long = 0,

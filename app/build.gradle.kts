@@ -1,8 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
+}
+
+val releaseSigningPropertiesFile = file("${System.getProperty("user.home")}/.android/BandSongbook-release.properties")
+val releaseSigningProperties = Properties().apply {
+    require(releaseSigningPropertiesFile.isFile) {
+        "Missing release signing properties: $releaseSigningPropertiesFile"
+    }
+    releaseSigningPropertiesFile.inputStream().use { load(it) }
 }
 
 android {
@@ -13,8 +23,8 @@ android {
         applicationId = "com.fithealthzone.bandsongbook"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "2.1"
+        versionCode = 15
+        versionName = "3.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -22,9 +32,18 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file(requireNotNull(releaseSigningProperties.getProperty("storeFile")))
+            storePassword = requireNotNull(releaseSigningProperties.getProperty("storePassword"))
+            keyAlias = requireNotNull(releaseSigningProperties.getProperty("keyAlias"))
+            keyPassword = requireNotNull(releaseSigningProperties.getProperty("keyPassword"))
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -79,6 +98,7 @@ dependencies {
 
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
+    implementation("androidx.media3:media3-session:1.3.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")

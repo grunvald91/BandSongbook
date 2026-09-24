@@ -16,7 +16,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -32,6 +35,16 @@ data class GroupSyncMetaUi(
     val serverUpdatedAtText: String,
     val members: List<GroupMemberUi>
 )
+
+private suspend fun <T> runCatchingPreservingCancellation(
+    block: suspend () -> T
+): Result<T> = try {
+    Result.success(block())
+} catch (error: CancellationException) {
+    throw error
+} catch (error: Throwable) {
+    Result.failure(error)
+}
 
 class SettingsViewModel : ViewModel() {
     val syncSettings: StateFlow<SyncSettings> = AppContainer.settingsRepository.syncSettings
@@ -110,7 +123,7 @@ class SettingsViewModel : ViewModel() {
             return
         }
         viewModelScope.launch {
-            runCatching {
+            runCatchingPreservingCancellation {
                 AppContainer.syncRepository.push(baseUrl.trim(), normalizedGroup, authToken.trim(), memberName.trim().ifBlank { "Неизвестно" })
             }.onSuccess {
                 AppContainer.settingsRepository.setLastSyncSuccessEpochMs()
@@ -132,7 +145,7 @@ class SettingsViewModel : ViewModel() {
             return
         }
         viewModelScope.launch {
-            runCatching {
+            runCatchingPreservingCancellation {
                 AppContainer.syncRepository.pull(baseUrl.trim(), normalizedGroup, authToken.trim())
             }.onSuccess { snapshot ->
                 AppContainer.settingsRepository.setLastSyncSuccessEpochMs()
@@ -149,7 +162,7 @@ class SettingsViewModel : ViewModel() {
         if (baseUrl.isBlank() || normalizedGroup.isBlank() || !isValidGroupCode(normalizedGroup)) return
         viewModelScope.launch {
             _isGroupStateRefreshing.value = true
-            runCatching {
+            runCatchingPreservingCancellation {
                 AppContainer.syncRepository.fetchGroupMeta(baseUrl.trim(), normalizedGroup, authToken.trim())
             }.onSuccess { meta ->
                 updateGroupMeta(meta)
@@ -176,7 +189,7 @@ class SettingsViewModel : ViewModel() {
             return
         }
         viewModelScope.launch {
-            runCatching {
+            runCatchingPreservingCancellation {
                 AppContainer.syncRepository.roundTrip(
                     baseUrl.trim(),
                     normalizedGroup,
@@ -211,45 +224,48 @@ class SettingsViewModel : ViewModel() {
             return
         }
         viewModelScope.launch {
-            runCatching {
-                if (wipeLibrary) {
-                    wipeLibraryData()
-                }
-                AppContainer.settingsRepository.saveSyncSettings(
-                    baseUrl = baseUrl.trim(),
+            try {
+                val normalizedBaseUrl = baseUrl.trim()
+                val normalizedToken = authToken.trim()
+                val snapshot = AppContainer.syncRepository.activateFromRemote(
+                    baseUrl = normalizedBaseUrl,
                     groupCode = normalizedGroup,
-                    memberName = memberName.trim(),
-                    authToken = authToken.trim()
+                    authToken = normalizedToken,
+                    replaceLocalLibrary = wipeLibrary
                 )
-                AppContainer.settingsRepository.setLibraryMode(LibraryMode.GROUP)
-                val sync = AppContainer.settingsRepository.getSyncSettingsSnapshot()
-                if (sync.backgroundEnabled) {
-                    SyncScheduler.schedule(context, sync.intervalMinutes)
+                // Once the database transaction has committed, finish the matching
+                // settings transition even if the screen/ViewModel is being closed.
+                withContext(NonCancellable) {
+                    AppContainer.settingsRepository.saveSyncSettings(
+                        baseUrl = normalizedBaseUrl,
+                        groupCode = normalizedGroup,
+                        memberName = memberName.trim(),
+                        authToken = normalizedToken
+                    )
+                    AppContainer.settingsRepository.setLibraryMode(LibraryMode.GROUP)
+                    val sync = AppContainer.settingsRepository.getSyncSettingsSnapshot()
+                    if (sync.backgroundEnabled) {
+                        SyncScheduler.schedule(context, sync.intervalMinutes)
+                    }
+                    AppContainer.settingsRepository.setLastSyncSuccessEpochMs()
                 }
-                val snapshot = AppContainer.syncRepository.roundTrip(
-                    baseUrl = baseUrl.trim(),
-                    groupCode = normalizedGroup,
-                    authToken = authToken.trim(),
-                    memberName = memberName.trim().ifBlank { "Неизвестно" }
-                )
-                AppContainer.settingsRepository.setLastSyncSuccessEpochMs()
-                snapshot
-            }.onSuccess { snapshot ->
                 updateGroupMeta(snapshot)
                 _syncStatus.value = if (wipeLibrary) {
                     "Режим группы включён, библиотека очищена и синхронизирована"
                 } else {
                     "Режим группы включён"
                 }
-            }.onFailure {
-                _syncStatus.value = "Ошибка переключения режима: ${humanizeSyncError(it.message)}"
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _syncStatus.value = "Ошибка переключения режима: ${humanizeSyncError(error.message)}"
             }
         }
     }
 
     fun activateLocalMode(context: Context, wipeLibrary: Boolean) {
         viewModelScope.launch {
-            runCatching {
+            runCatchingPreservingCancellation {
                 SyncScheduler.cancel(context)
                 AppContainer.settingsRepository.clearSyncSettings()
                 AppContainer.settingsRepository.setLibraryMode(LibraryMode.LOCAL)
@@ -298,7 +314,7 @@ class SettingsViewModel : ViewModel() {
 
     fun exportBackupJson(memberName: String, onReady: (String) -> Unit) {
         viewModelScope.launch {
-            runCatching {
+            runCatchingPreservingCancellation {
                 AppContainer.syncRepository.exportSnapshotJson(memberName.ifBlank { "Неизвестно" })
             }.onSuccess {
                 onReady(it)
@@ -311,7 +327,7 @@ class SettingsViewModel : ViewModel() {
 
     fun importBackupJson(raw: String) {
         viewModelScope.launch {
-            runCatching {
+            runCatchingPreservingCancellation {
                 AppContainer.syncRepository.importSnapshotJson(raw)
             }.onSuccess {
                 _syncStatus.value = "Импорт JSON успешно завершен"

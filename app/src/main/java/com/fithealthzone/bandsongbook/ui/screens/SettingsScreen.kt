@@ -40,7 +40,10 @@ import com.fithealthzone.bandsongbook.ui.theme.GlassCard
 import com.fithealthzone.bandsongbook.ui.viewmodel.SettingsViewModel
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(
+    onCheckUpdates: () -> Unit = {},
+    onEnableUpdateNotifications: () -> Unit = {}
+) {
     val vm: SettingsViewModel = viewModel()
     val display by vm.displaySettings.collectAsState()
     val context = LocalContext.current
@@ -155,6 +158,31 @@ fun SettingsScreen() {
                     color = AppColors.TextMuted,
                     fontSize = 12.sp
                 )
+            }
+        }
+
+        GlassCard(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("ОБНОВЛЕНИЯ", color = AppColors.TextWhite, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Автоматическая проверка: раз в неделю",
+                    color = AppColors.TextMuted,
+                    fontSize = 12.sp
+                )
+                Button(
+                    onClick = onCheckUpdates,
+                    colors = primaryButtonColors,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Проверить обновления")
+                }
+                Button(
+                    onClick = onEnableUpdateNotifications,
+                    colors = primaryButtonColors,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Разрешить уведомления об обновлениях")
+                }
             }
         }
 

@@ -2,19 +2,19 @@ package com.fithealthzone.bandsongbook.transpose
 
 object ChordDetector {
     // Standard chord roots
-    private val roots = "A|B|C|D|E|F|G"
+    private val roots = "[A-H]"
     // Accidentals
     private val accidentals = "[#b]?"
-    // Chord quality/extensions
-    private val qualities =
-        "(?:m|min|maj|dim|aug|sus[24]?|add(?:9|11|13)|7|maj7|m7|min7|dim7|aug7|6|m6|9|11|13|5|2|sus|madd9|m9|m11|m13|maj9|maj11|maj13|7sus4|7sus2|7b5|7#5|7b9|7#9|m7b5|mmaj7|\\+|°|ø)?"
+    // Keep the accepted suffix grammar aligned with BandBook-v2/src/utils/chords.ts.
+    private val quality = "(?:maj|min|dim|aug|sus|add|m|M|\\+|°|ø)?"
+    private val suffix = "(?:$quality\\d{0,2}(?:sus\\d?|add\\d?|maj\\d?|m\\d?)?(?:[#b]\\d{1,2})?)*"
     // Optional bass note
     private val bassNote = "(?:/(?:$roots)$accidentals)?"
 
     // Full chord pattern — must be at word boundary
     private val chordPattern = Regex(
-        "(?:(?<=^)|(?<=\\s)|(?<=\\())($roots$accidentals$qualities$bassNote)(?=\\s|$|\\)|,|;|\\.)",
-        setOf(RegexOption.MULTILINE)
+        "(?:(?<=^)|(?<=\\s)|(?<=\\())($roots$accidentals$suffix$bassNote)(?=\\s|$|\\)|,|;|\\.)",
+        setOf(RegexOption.MULTILINE, RegexOption.IGNORE_CASE)
     )
 
     // Pattern for already-wrapped chords
@@ -44,10 +44,11 @@ object ChordDetector {
     private fun processLine(line: String, lineStartInText: Int, protectedRanges: List<IntRange>): String {
         if (line.isBlank()) return line
 
-        // Skip lines that are formatting tags only
-        if (line.trim().startsWith("<") && line.trim().endsWith(">")) return line
+        val tagRegex = Regex("<[^>]+>")
+        if (tagRegex.replace(line, "").isBlank()) return line
 
-        val matches = chordPattern.findAll(line).toList()
+        val searchableLine = tagRegex.replace(line) { " ".repeat(it.value.length) }
+        val matches = chordPattern.findAll(searchableLine).toList()
         if (matches.isEmpty()) return line
 
         val result = StringBuilder()

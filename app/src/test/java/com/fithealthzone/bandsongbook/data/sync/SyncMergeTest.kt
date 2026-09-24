@@ -1,5 +1,6 @@
 package com.fithealthzone.bandsongbook.data.sync
 
+import com.fithealthzone.bandsongbook.data.local.SetlistEntity
 import com.fithealthzone.bandsongbook.data.local.SetlistItemEntity
 import com.fithealthzone.bandsongbook.data.local.SongAudioEntity
 import com.fithealthzone.bandsongbook.data.local.SongEntity
@@ -65,6 +66,21 @@ class SyncMergeTest {
         durationMs = durationMs,
         uploadedBy = null,
         addedAt = addedAt,
+        deletedAt = deletedAt
+    )
+
+    private fun setlist(
+        id: String,
+        name: String,
+        updatedAt: Long,
+        deletedAt: Long? = null
+    ) = SetlistEntity(
+        id = id,
+        name = name,
+        eventDate = null,
+        notes = null,
+        createdAt = 0L,
+        updatedAt = updatedAt,
         deletedAt = deletedAt
     )
 
@@ -292,5 +308,255 @@ class SyncMergeTest {
         )
         assertEquals(1, merged.size)
         assertNull(merged.single().objectKey)
+    }
+
+    @Test
+    fun `mergeAudio keeps local tombstone over equal incoming live row`() {
+        val localDeleted = audio(id = "a1", songId = "s1", addedAt = 100L, deletedAt = 500L)
+        val incomingLive = audio(id = "a1", songId = "s1", addedAt = 500L, deletedAt = null)
+
+        val merged = SyncMerge.mergeAudio(mapOf("a1" to localDeleted), listOf(incomingLive), setOf("s1"))
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `mergeAudio accepts incoming tombstone over equal local live row`() {
+        val localLive = audio(id = "a1", songId = "s1", addedAt = 500L, deletedAt = null)
+        val incomingDeleted = audio(id = "a1", songId = "s1", addedAt = 100L, deletedAt = 500L)
+
+        val merged = SyncMerge.mergeAudio(mapOf("a1" to localLive), listOf(incomingDeleted), setOf("s1"))
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `mergeSetlistItems keeps local tombstone over equal incoming live row`() {
+        val localDeleted = setlistItem(id = "i1", setlistId = "sl1", songId = "s1", updatedAt = 100L, deletedAt = 500L)
+        val incomingLive = setlistItem(id = "i1", setlistId = "sl1", songId = "s1", updatedAt = 500L, deletedAt = null)
+
+        val merged = SyncMerge.mergeSetlistItems(
+            mapOf("i1" to localDeleted), listOf(incomingLive), setOf("sl1"), setOf("s1")
+        )
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `mergeSetlistItems accepts incoming tombstone over equal local live row`() {
+        val localLive = setlistItem(id = "i1", setlistId = "sl1", songId = "s1", updatedAt = 500L, deletedAt = null)
+        val incomingDeleted = setlistItem(id = "i1", setlistId = "sl1", songId = "s1", updatedAt = 100L, deletedAt = 500L)
+
+        val merged = SyncMerge.mergeSetlistItems(
+            mapOf("i1" to localLive), listOf(incomingDeleted), setOf("sl1"), setOf("s1")
+        )
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    // --- Equal-version delete/live conflicts: deletion must win in both directions ---
+
+    @Test
+    fun `mergeSongs keeps local tombstone over equal incoming live row`() {
+        val localDeleted = song(id = "s1", title = "Deleted", updatedAt = 100L, deletedAt = 500L)
+        val incomingLive = song(id = "s1", title = "Live", updatedAt = 500L, deletedAt = null)
+
+        val merged = SyncMerge.mergeSongs(mapOf("s1" to localDeleted), listOf(incomingLive))
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `mergeSongs accepts incoming tombstone over equal local live row`() {
+        val localLive = song(id = "s1", title = "Live", updatedAt = 500L, deletedAt = null)
+        val incomingDeleted = song(id = "s1", title = "Deleted", updatedAt = 100L, deletedAt = 500L)
+
+        val merged = SyncMerge.mergeSongs(mapOf("s1" to localLive), listOf(incomingDeleted))
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `mergeSetlists keeps local tombstone over equal incoming live row`() {
+        val localDeleted = setlist(id = "sl1", name = "Deleted", updatedAt = 100L, deletedAt = 500L)
+        val incomingLive = setlist(id = "sl1", name = "Live", updatedAt = 500L, deletedAt = null)
+
+        val merged = SyncMerge.mergeSetlists(mapOf("sl1" to localDeleted), listOf(incomingLive))
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `mergeSetlists accepts incoming tombstone over equal local live row`() {
+        val localLive = setlist(id = "sl1", name = "Live", updatedAt = 500L, deletedAt = null)
+        val incomingDeleted = setlist(id = "sl1", name = "Deleted", updatedAt = 100L, deletedAt = 500L)
+
+        val merged = SyncMerge.mergeSetlists(mapOf("sl1" to localLive), listOf(incomingDeleted))
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    // --- applySongTombstones: интероп с веб-клиентом и сервером ---
+
+    @Test
+    fun `applySongTombstones flips older local row to deleted`() {
+        val local = song(id = "s1", title = "Local", updatedAt = 100L)
+        val merged = SyncMerge.applySongTombstones(
+            songs = listOf(local),
+            tombstones = listOf(SyncTombstoneDto(id = "s1", deletedAt = 500L))
+        )
+        val result = merged.single()
+        assertEquals(500L, result.deletedAt)
+        // Личные настройки не трогаем — заголовок остался, чтобы локальный кеш был
+        // консистентен (UI его всё равно не покажет).
+        assertEquals("Local", result.title)
+    }
+
+    @Test
+    fun `applySongTombstones does NOT flip newer local row`() {
+        // Локально пользователь редактировал запись позже, чем кто-то удалил её на
+        // другом клиенте. LWW: живая запись побеждает.
+        val local = song(id = "s1", title = "Edited later", updatedAt = 1_000L)
+        val merged = SyncMerge.applySongTombstones(
+            songs = listOf(local),
+            tombstones = listOf(SyncTombstoneDto(id = "s1", deletedAt = 500L))
+        )
+        assertNull(merged.single().deletedAt)
+        assertEquals("Edited later", merged.single().title)
+    }
+
+    @Test
+    fun `applySongTombstones lets tombstone win equal timestamp`() {
+        val local = song(id = "s1", title = "Same instant", updatedAt = 500L)
+        val merged = SyncMerge.applySongTombstones(
+            songs = listOf(local),
+            tombstones = listOf(SyncTombstoneDto(id = "s1", deletedAt = 500L))
+        )
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `applySongTombstones creates stub when local row missing`() {
+        // Стаб никогда не покажется в UI (WHERE deletedAt IS NULL), но в следующем push
+        // мы переиздадим tombstone и тот узнает остальные клиенты, что запись удалена.
+        val merged = SyncMerge.applySongTombstones(
+            songs = emptyList(),
+            tombstones = listOf(SyncTombstoneDto(id = "ghost", deletedAt = 777L, deletedBy = "alice"))
+        )
+        val stub = merged.single()
+        assertEquals("ghost", stub.id)
+        assertEquals(777L, stub.deletedAt)
+        assertEquals(777L, stub.updatedAt)
+    }
+
+    @Test
+    fun `applySongTombstones picks latest deletedAt when multiple tombstones for same id`() {
+        val merged = SyncMerge.applySongTombstones(
+            songs = listOf(song(id = "s1", updatedAt = 100L)),
+            tombstones = listOf(
+                SyncTombstoneDto(id = "s1", deletedAt = 200L),
+                SyncTombstoneDto(id = "s1", deletedAt = 999L),
+                SyncTombstoneDto(id = "s1", deletedAt = 500L)
+            )
+        )
+        assertEquals(999L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `applySetlistTombstones flips older local setlist to deleted`() {
+        val local = SetlistEntity(
+            id = "sl1",
+            name = "Gig",
+            eventDate = null,
+            notes = null,
+            createdAt = 0L,
+            updatedAt = 100L,
+            deletedAt = null
+        )
+        val merged = SyncMerge.applySetlistTombstones(
+            setlists = listOf(local),
+            tombstones = listOf(SyncTombstoneDto(id = "sl1", deletedAt = 500L))
+        )
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `applySetlistTombstones keeps newer local live setlist`() {
+        val local = SetlistEntity(
+            id = "sl1",
+            name = "Gig",
+            eventDate = null,
+            notes = null,
+            createdAt = 0L,
+            updatedAt = 1_000L,
+            deletedAt = null
+        )
+        val merged = SyncMerge.applySetlistTombstones(
+            setlists = listOf(local),
+            tombstones = listOf(SyncTombstoneDto(id = "sl1", deletedAt = 500L))
+        )
+        assertNull(merged.single().deletedAt)
+    }
+
+    @Test
+    fun `applySetlistTombstones lets tombstone win equal timestamp`() {
+        val local = SetlistEntity(
+            id = "sl1",
+            name = "Same instant",
+            eventDate = null,
+            notes = null,
+            createdAt = 0L,
+            updatedAt = 500L,
+            deletedAt = null
+        )
+        val merged = SyncMerge.applySetlistTombstones(
+            setlists = listOf(local),
+            tombstones = listOf(SyncTombstoneDto(id = "sl1", deletedAt = 500L))
+        )
+
+        assertEquals(500L, merged.single().deletedAt)
+    }
+
+    @Test
+    fun `applySetlistTombstones creates stub for unknown id`() {
+        val merged = SyncMerge.applySetlistTombstones(
+            setlists = emptyList(),
+            tombstones = listOf(SyncTombstoneDto(id = "sl-ghost", deletedAt = 42L))
+        )
+        val stub = merged.single()
+        assertEquals("sl-ghost", stub.id)
+        assertEquals(42L, stub.deletedAt)
+    }
+
+    @Test
+    fun `merge then apply tombstone — live edit older than tombstone gets deleted`() {
+        // Пайплайн как в importSnapshot: сперва merge живых записей, затем
+        // applySongTombstones. Если remote tombstone новее локального updatedAt —
+        // запись должна стать удалённой.
+        val local = song(id = "s1", title = "old", updatedAt = 100L)
+        val incoming = song(id = "s1", title = "remote edit", updatedAt = 200L)
+        val mergedLive = SyncMerge.mergeSongs(mapOf("s1" to local), listOf(incoming))
+        val final = SyncMerge.applySongTombstones(
+            songs = mergedLive,
+            tombstones = listOf(SyncTombstoneDto(id = "s1", deletedAt = 300L))
+        )
+        assertEquals(300L, final.single().deletedAt)
+    }
+
+    @Test
+    fun `merge then apply tombstone — newer live edit resurrects record`() {
+        // Локальный tombstone в snapshot.deletedSongs[] не сработает, потому что в
+        // живых рядах удалённой клиент даже не отправит. Зато проверяем обратное:
+        // если приходит свежий remote-live, он перебивает старый локальный tombstone.
+        val local = song(id = "s1", title = "deleted locally", updatedAt = 100L, deletedAt = 200L)
+        val incoming = song(id = "s1", title = "resurrected", updatedAt = 999L)
+        val mergedLive = SyncMerge.mergeSongs(mapOf("s1" to local), listOf(incoming))
+        val final = SyncMerge.applySongTombstones(
+            songs = mergedLive,
+            tombstones = emptyList()
+        )
+        assertNull(final.single().deletedAt)
+        assertEquals("resurrected", final.single().title)
     }
 }

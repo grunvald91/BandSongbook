@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Check
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
@@ -71,6 +73,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -88,11 +91,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import com.fithealthzone.bandsongbook.AppContainer
 import com.fithealthzone.bandsongbook.data.settings.DisplaySettings
 import com.fithealthzone.bandsongbook.data.settings.ThemeMode
-import com.fithealthzone.bandsongbook.media.AudioPlaybackCache
+import com.fithealthzone.bandsongbook.media.rememberPlaybackController
+import com.fithealthzone.bandsongbook.media.PlaybackMediaId
+import com.fithealthzone.bandsongbook.media.AudioCacheKey
+import com.fithealthzone.bandsongbook.formatting.SongFormatting
+import com.fithealthzone.bandsongbook.transpose.ChordDetector
 import com.fithealthzone.bandsongbook.transpose.ChordTransposer
 import com.fithealthzone.bandsongbook.ui.LocalSnackbarHostState
 import com.fithealthzone.bandsongbook.ui.theme.AppColors
@@ -110,6 +118,7 @@ private val chordRegex = Regex("""\[(.+?)]""")
 private val effectTagRegex = Regex("(?i)</?(b|u|i|color(?:=[^>]+)?|mark)>")
 private const val AUTO_SCROLL_BASE_PX_PER_SECOND = 22f
 
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 @Composable
 fun SongViewerScreen(
     songId: String,
@@ -165,7 +174,7 @@ fun SongViewerScreen(
 
     var autoScroll by remember { mutableStateOf(false) }
     var isFullscreen by remember { mutableStateOf(initialFullscreen) }
-    var controlsExpanded by remember { mutableStateOf(true) }
+    var controlsExpanded by remember(songId) { mutableStateOf(false) }
 
     var partLabel by remember { mutableStateOf("") }
     var pendingAudioUri by remember { mutableStateOf<Uri?>(null) }
@@ -230,8 +239,12 @@ fun SongViewerScreen(
         }
     }
 
-    val player = remember { AudioPlaybackCache.buildPlayer(context) }
+    val player = rememberPlaybackController()
     DisposableEffect(player) {
+        val connectedPlayer = player
+        if (connectedPlayer == null) {
+            return@DisposableEffect onDispose { }
+        }
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 isPlayerPlaying = isPlaying
@@ -241,18 +254,22 @@ fun SongViewerScreen(
                 if (playbackState == Player.STATE_ENDED) {
                     isPlayerPlaying = false
                 }
-                playbackDurationMs = player.duration.coerceAtLeast(0L)
+                playbackDurationMs = connectedPlayer.duration.coerceAtLeast(0L)
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                currentPlayingAudioId = mediaItem?.mediaId?.let(PlaybackMediaId::audioId)
                 playbackPositionMs = 0L
-                playbackDurationMs = player.duration.coerceAtLeast(0L)
+                playbackDurationMs = connectedPlayer.duration.coerceAtLeast(0L)
             }
         }
-        player.addListener(listener)
+        currentPlayingAudioId = connectedPlayer.currentMediaItem?.mediaId?.let(PlaybackMediaId::audioId)
+        isPlayerPlaying = connectedPlayer.isPlaying
+        playbackPositionMs = connectedPlayer.currentPosition.coerceAtLeast(0L)
+        playbackDurationMs = connectedPlayer.duration.takeIf { it > 0 } ?: 0L
+        connectedPlayer.addListener(listener)
         onDispose {
-            player.removeListener(listener)
-            player.release()
+            connectedPlayer.removeListener(listener)
         }
     }
 
@@ -265,10 +282,13 @@ fun SongViewerScreen(
         onDispose { view.keepScreenOn = prev }
     }
 
-    val transformedLyrics = remember(song?.lyricsWithChords, transpose, preferFlats) {
-        song?.lyricsWithChords?.let {
+    val normalizedLyrics = remember(song?.lyricsWithChords) {
+        ChordDetector.autoWrapChords(SongFormatting.normalize(song?.lyricsWithChords.orEmpty()))
+    }
+    val transformedLyrics = remember(normalizedLyrics, transpose, preferFlats) {
+        normalizedLyrics.let {
             ChordTransposer.transposeLyrics(it, transpose, preferFlats = preferFlats)
-        } ?: ""
+        }
     }
 
     val viewerLyricsFontSp = display.lyricsFontSp.toFloat()
@@ -309,10 +329,11 @@ fun SongViewerScreen(
         }
     }
 
-    LaunchedEffect(currentPlayingAudioId, isPlayerPlaying) {
+    LaunchedEffect(currentPlayingAudioId, isPlayerPlaying, player) {
         while (currentPlayingAudioId != null) {
-            playbackPositionMs = player.currentPosition.coerceAtLeast(0L)
-            playbackDurationMs = player.duration.takeIf { it > 0 } ?: 0L
+            val connectedPlayer = player ?: break
+            playbackPositionMs = connectedPlayer.currentPosition.coerceAtLeast(0L)
+            playbackDurationMs = connectedPlayer.duration.takeIf { it > 0 } ?: 0L
             delay(if (isPlayerPlaying) 250 else 500)
         }
     }
@@ -336,7 +357,7 @@ fun SongViewerScreen(
                         color = AppColors.TextWhite,
                         fontSize = 21.sp,
                         fontWeight = FontWeight.Black,
-                        modifier = Modifier.padding(bottom = 4.dp)
+                        modifier = Modifier.padding(end = 54.dp, bottom = 4.dp)
                     )
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -362,8 +383,16 @@ fun SongViewerScreen(
                             .fillMaxWidth()
                             .background(
                                 if (line.hasHighlight) highlightBlockColor() else Color.Transparent,
-                                RoundedCornerShape(12.dp)
+                                RoundedCornerShape(topEnd = 12.dp, bottomEnd = 12.dp)
                             )
+                            .drawBehind {
+                                if (line.hasHighlight) {
+                                    drawRect(
+                                        color = AppColors.Primary,
+                                        size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height)
+                                    )
+                                }
+                            }
                             .padding(horizontal = if (line.hasHighlight) 10.dp else 0.dp, vertical = if (line.hasHighlight) 7.dp else 0.dp)
                     ) {
                         Text(
@@ -377,15 +406,19 @@ fun SongViewerScreen(
                 }
             }
 
-            OverlayIconButton(
-                icon = Icons.Default.FullscreenExit,
-                contentDescription = "Выйти из полноэкранного",
+            Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
                     .padding(10.dp),
-                onClick = { isFullscreen = false }
-            )
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                OverlayIconButton(
+                    icon = Icons.Default.FullscreenExit,
+                    contentDescription = "Выйти из полноэкранного",
+                    onClick = { isFullscreen = false }
+                )
+            }
 
             OverlayIconButton(
                 icon = if (autoScroll) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -502,8 +535,16 @@ fun SongViewerScreen(
                         .fillMaxWidth()
                         .background(
                             if (paragraph.hasHighlight) highlightBlockColor() else Color.Transparent,
-                            RoundedCornerShape(12.dp)
+                            RoundedCornerShape(topEnd = 12.dp, bottomEnd = 12.dp)
                         )
+                        .drawBehind {
+                            if (paragraph.hasHighlight) {
+                                drawRect(
+                                    color = AppColors.Primary,
+                                    size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height)
+                                )
+                            }
+                        }
                         .padding(horizontal = if (paragraph.hasHighlight) 10.dp else 0.dp, vertical = if (paragraph.hasHighlight) 7.dp else 0.dp)
                 ) {
                     Text(
@@ -525,7 +566,7 @@ fun SongViewerScreen(
         }
         val collapsedControlsPx = with(density) { collapsedControlsHeight.toPx() }
         val expandedControlsPx = with(density) { expandedControlsHeight.toPx() }
-        val controlsHeightPx = remember { Animatable(if (controlsExpanded) expandedControlsPx else collapsedControlsPx) }
+        val controlsHeightPx = remember(songId) { Animatable(collapsedControlsPx) }
         LaunchedEffect(collapsedControlsPx, expandedControlsPx) {
             val target = if (controlsExpanded) expandedControlsPx else collapsedControlsPx
             if (controlsHeightPx.value !in (collapsedControlsPx - 1f)..(expandedControlsPx + 1f)) {
@@ -871,12 +912,13 @@ fun SongViewerScreen(
                                                         prominent = true,
                                                         active = true,
                                                         onClick = {
+                                                            val connectedPlayer = player ?: return@PlayerTransportButton
                                                             if (isPlayerPlaying) {
-                                                                player.pause()
+                                                                connectedPlayer.pause()
                                                                 return@PlayerTransportButton
                                                             }
-                                                            if (player.mediaItemCount > 0) {
-                                                                player.play()
+                                                            if (connectedPlayer.mediaItemCount > 0) {
+                                                                connectedPlayer.play()
                                                                 return@PlayerTransportButton
                                                             }
                                                             scope.launch {
@@ -888,9 +930,21 @@ fun SongViewerScreen(
                                                                     )
                                                                     return@launch
                                                                 }
-                                                                player.setMediaItem(MediaItem.fromUri(playbackUri))
-                                                                player.prepare()
-                                                                player.playWhenReady = true
+                                                                connectedPlayer.setMediaItem(
+                                                                    MediaItem.Builder()
+                                                                        .setMediaId(a.id)
+                                                                                                                                                .setUri(playbackUri)
+                                                                                                                                                .setCustomCacheKey(AudioCacheKey.forAttachment(a))
+                                                                        .setMediaMetadata(
+                                                                            MediaMetadata.Builder()
+                                                                                .setTitle(a.title)
+                                                                                .setArtist(song?.title)
+                                                                                .build()
+                                                                        )
+                                                                        .build()
+                                                                )
+                                                                connectedPlayer.prepare()
+                                                                connectedPlayer.playWhenReady = true
                                                                 currentPlayingAudioId = a.id
                                                             }
                                                         }
@@ -899,7 +953,7 @@ fun SongViewerScreen(
                                                         icon = Icons.Default.Stop,
                                                         contentDescription = "Остановить ${a.title}",
                                                         onClick = {
-                                                            player.stop()
+                                                            player?.stop()
                                                             currentPlayingAudioId = null
                                                             isPlayerPlaying = false
                                                             playbackPositionMs = 0L
@@ -910,7 +964,7 @@ fun SongViewerScreen(
                                                         icon = Icons.Default.Delete,
                                                         contentDescription = "Открепить ${a.title}",
                                                         onClick = {
-                                                            player.stop()
+                                                            player?.stop()
                                                             currentPlayingAudioId = null
                                                             isPlayerPlaying = false
                                                             playbackPositionMs = 0L
@@ -925,8 +979,8 @@ fun SongViewerScreen(
                                                 durationMs = playbackDurationMs,
                                                 onSeek = { fraction ->
                                                     val duration = playbackDurationMs.takeIf { it > 0 } ?: return@ThinSeekBar
-                                                    player.seekTo((duration * fraction).toLong().coerceIn(0L, duration))
-                                                    playbackPositionMs = player.currentPosition.coerceAtLeast(0L)
+                                                    player?.seekTo((duration * fraction).toLong().coerceIn(0L, duration))
+                                                    playbackPositionMs = player?.currentPosition?.coerceAtLeast(0L) ?: 0L
                                                 }
                                             )
                                             Row(
@@ -965,6 +1019,7 @@ fun SongViewerScreen(
                                                     icon = Icons.Default.PlayArrow,
                                                     contentDescription = "Играть ${a.title}",
                                                     onClick = {
+                                                        val connectedPlayer = player ?: return@PlayerTransportButton
                                                         scope.launch {
                                                             val playbackUri = vm.resolvePlaybackUri(context, a)
                                                             if (playbackUri.isNullOrBlank()) {
@@ -974,9 +1029,21 @@ fun SongViewerScreen(
                                                                 )
                                                                 return@launch
                                                             }
-                                                            player.setMediaItem(MediaItem.fromUri(playbackUri))
-                                                            player.prepare()
-                                                            player.playWhenReady = true
+                                                            connectedPlayer.setMediaItem(
+                                                                MediaItem.Builder()
+                                                                    .setMediaId(a.id)
+                                                                                                                                            .setUri(playbackUri)
+                                                                                                                                            .setCustomCacheKey(AudioCacheKey.forAttachment(a))
+                                                                    .setMediaMetadata(
+                                                                        MediaMetadata.Builder()
+                                                                            .setTitle(a.title)
+                                                                            .setArtist(song?.title)
+                                                                            .build()
+                                                                    )
+                                                                    .build()
+                                                            )
+                                                            connectedPlayer.prepare()
+                                                            connectedPlayer.playWhenReady = true
                                                             currentPlayingAudioId = a.id
                                                         }
                                                     }
@@ -1021,7 +1088,6 @@ private fun renderLineWithChordHighlights(
                         append(segment.text.substring(cursor, start))
                     }
                 }
-                val rawToken = match.value
                 val chord = match.groupValues[1]
                 val paddedChord = " " + chord + " "
                 withStyle(
@@ -1058,71 +1124,64 @@ private fun renderLyricsParagraphsWithFormatting(
 ): List<LyricsParagraph> {
     if (lyrics.isEmpty()) return listOf(LyricsParagraph(AnnotatedString(""), hasHighlight = false))
 
-    val segments = parseInlineFormatting(lyrics)
     val out = mutableListOf<LyricsParagraph>()
-    var currentParagraph = AnnotatedString.Builder()
-    var paragraphHasHighlight = false
-    var newlineRun = 0
+    SongFormatting.sections(lyrics).forEach { section ->
+        var currentParagraph = AnnotatedString.Builder()
+        var newlineRun = 0
 
-    fun flushParagraph(forceEmpty: Boolean = false) {
-        if (currentParagraph.length > 0 || forceEmpty) {
-            out += LyricsParagraph(
-                text = currentParagraph.toAnnotatedString(),
-                hasHighlight = paragraphHasHighlight
-            )
-            currentParagraph = AnnotatedString.Builder()
-            paragraphHasHighlight = false
+        fun flushParagraph() {
+            if (currentParagraph.length > 0) {
+                out += LyricsParagraph(
+                    text = currentParagraph.toAnnotatedString(),
+                    hasHighlight = section.highlighted
+                )
+                currentParagraph = AnnotatedString.Builder()
+            }
         }
-    }
 
-    segments.forEach { segment ->
-        if (segment.highlighted) paragraphHasHighlight = true
-        var cursor = 0
-        chordRegex.findAll(segment.text).forEach { match ->
-            val start = match.range.first
-            if (start > cursor) {
-                currentParagraph.withStyle(segment.style) {
-                    append(segment.text.substring(cursor, start))
+        fun appendStyled(text: String, style: SpanStyle) {
+            text.forEach { ch ->
+                if (!section.highlighted && ch == '\n') {
+                    newlineRun++
+                    if (newlineRun >= 2) {
+                        flushParagraph()
+                        newlineRun = 0
+                    } else if (currentParagraph.length > 0) {
+                        currentParagraph.append('\n')
+                    }
+                } else {
+                    newlineRun = 0
+                    currentParagraph.withStyle(style) { append(ch) }
                 }
             }
-            val rawToken = match.value
-            val chord = match.groupValues[1]
-            val paddedChord = " " + chord + " "
-            currentParagraph.withStyle(
-                segment.style.merge(
-                    SpanStyle(
-                        color = chordColor,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = chordFontSize
+        }
+
+        parseInlineFormatting(section.markup).forEach { segment ->
+            var cursor = 0
+            chordRegex.findAll(segment.text).forEach { match ->
+                if (match.range.first > cursor) {
+                    appendStyled(segment.text.substring(cursor, match.range.first), segment.style)
+                }
+                appendStyled(
+                    " ${match.groupValues[1]} ",
+                    segment.style.merge(
+                        SpanStyle(
+                            color = chordColor,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = chordFontSize
+                        )
                     )
                 )
-            ) {
-                append(paddedChord)
+                cursor = match.range.last + 1
             }
-            cursor = match.range.last + 1
-        }
-
-        val tail = segment.text.substring(cursor)
-        tail.forEach { ch ->
-            if (ch == '\n') {
-                newlineRun += 1
-                if (newlineRun >= 2) {
-                    flushParagraph()
-                    newlineRun = 0
-                } else {
-                    currentParagraph.append('\n')
-                }
-            } else {
-                newlineRun = 0
-                currentParagraph.withStyle(segment.style) {
-                    append(ch)
-                }
+            if (cursor < segment.text.length) {
+                appendStyled(segment.text.substring(cursor), segment.style)
             }
         }
+        flushParagraph()
     }
 
-    flushParagraph(forceEmpty = true)
-    return out
+    return out.ifEmpty { listOf(LyricsParagraph(AnnotatedString(""), hasHighlight = false)) }
 }
 
 private data class InlineSegment(
@@ -1196,7 +1255,7 @@ private fun parseColorTag(tag: String): Color? {
         .removeSuffix(">")
         .trim()
         .trim('"', '\'')
-    return runCatching { Color(android.graphics.Color.parseColor(value)) }.getOrNull()
+    return runCatching { Color(android.graphics.Color.parseColor(SongFormatting.toAndroidColor(value))) }.getOrNull()
 }
 
 private fun highlightBlockColor(): Color {

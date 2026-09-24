@@ -1,5 +1,8 @@
 package com.fithealthzone.bandsongbook.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -23,8 +26,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FormatClear
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -40,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -56,8 +63,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fithealthzone.bandsongbook.ui.theme.AppColors
 import com.fithealthzone.bandsongbook.ui.theme.GlassCard
 import com.fithealthzone.bandsongbook.ui.theme.StageIconButton
+import com.fithealthzone.bandsongbook.formatting.SongFormatting
 import com.fithealthzone.bandsongbook.ui.viewmodel.SongEditorState
 import com.fithealthzone.bandsongbook.ui.viewmodel.SongEditorViewModel
+import com.fithealthzone.bandsongbook.ui.viewmodel.SongViewerFactory
+import com.fithealthzone.bandsongbook.ui.viewmodel.SongViewerViewModel
 import kotlin.math.max
 import kotlin.math.min
 
@@ -114,15 +124,24 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
     }
 
     fun applyHighlightAccent() {
-        val wrapped = toggleSelectionHighlightTag(lyricsField)
+        val edit = SongFormatting.toggleHighlight(
+            lyricsField.text,
+            lyricsField.selection.start,
+            lyricsField.selection.end
+        )
+        val wrapped = TextFieldValue(
+            text = edit.text,
+            selection = TextRange(edit.selectionStart, edit.selectionEnd)
+        )
         lyricsField = wrapped
         set(state.copy(lyrics = wrapped.text))
     }
 
-    fun clearFormatting() {
-        val cleared = clearFormattingFromSelection(lyricsField)
+    fun clearAllFormatting() {
+        val clearedText = SongFormatting.clearAll(lyricsField.text)
+        val cleared = TextFieldValue(clearedText, selection = TextRange(clearedText.length))
         lyricsField = cleared
-        set(state.copy(lyrics = cleared.text))
+        set(state.copy(lyrics = clearedText))
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -175,6 +194,10 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
                 }
             }
 
+            if (songId != null) {
+                EditorAudioAttachmentSection(songId)
+            }
+
             GlassCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier
@@ -182,18 +205,11 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
                         .padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val hasEditorHighlight = editorHasHighlight(lyricsField)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .bringIntoViewResponder(NoParentBringIntoViewResponder)
-                            .background(editorHighlightBlockColor(lyricsField), RoundedCornerShape(18.dp))
-                            .border(
-                                width = if (hasEditorHighlight) 1.dp else 0.dp,
-                                color = if (hasEditorHighlight) editorHighlightBorderColor() else Color.Transparent,
-                                shape = RoundedCornerShape(18.dp)
-                            )
-                            .padding(horizontal = if (hasEditorHighlight) 10.dp else 0.dp, vertical = if (hasEditorHighlight) 10.dp else 0.dp)
+                            .background(Color.Transparent, RoundedCornerShape(18.dp))
                     ) {
                         OutlinedTextField(
                             value = lyricsField,
@@ -207,10 +223,10 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = AppColors.TextLight,
                                 unfocusedTextColor = AppColors.TextLight,
-                                focusedBorderColor = if (hasEditorHighlight) Color.Transparent else AppColors.BorderGlassStrong,
-                                unfocusedBorderColor = if (hasEditorHighlight) Color.Transparent else AppColors.BorderGlassStrong,
-                                focusedContainerColor = if (hasEditorHighlight) Color.Transparent else AppColors.BgCard,
-                                unfocusedContainerColor = if (hasEditorHighlight) Color.Transparent else AppColors.BgCard,
+                                focusedBorderColor = AppColors.BorderGlassStrong,
+                                unfocusedBorderColor = AppColors.BorderGlassStrong,
+                                focusedContainerColor = AppColors.BgCard,
+                                unfocusedContainerColor = AppColors.BgCard,
                                 cursorColor = AppColors.PrimaryLight
                             ),
                             modifier = Modifier.fillMaxWidth()
@@ -339,9 +355,182 @@ fun SongEditorScreen(songId: String?, onSaved: () -> Unit) {
                 MiniFormatButton("[ ]") { wrapSelection() }
                 MiniFormatIconButton(
                     icon = Icons.Default.FormatClear,
-                    contentDescription = "Сбросить форматирование",
-                    onClick = { clearFormatting() }
+                    contentDescription = "Полностью сбросить форматирование песни",
+                    onClick = { clearAllFormatting() }
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditorAudioAttachmentSection(songId: String) {
+    val context = LocalContext.current
+    val vm: SongViewerViewModel = viewModel(
+        key = "song-editor-audio-$songId",
+        factory = SongViewerFactory(songId)
+    )
+    val audio by vm.audio.collectAsState()
+    val uploadStatus by vm.uploadStatus.collectAsState()
+
+    var title by remember(songId) { mutableStateOf("") }
+    var selectedUri by remember(songId) { mutableStateOf<Uri?>(null) }
+    var selectedName by remember(songId) { mutableStateOf<String?>(null) }
+    var url by remember(songId) { mutableStateOf("") }
+    var urlMode by remember(songId) { mutableStateOf(false) }
+    val trimmedUrl = url.trim()
+    val validUrl = remember(trimmedUrl) {
+        val scheme = runCatching { Uri.parse(trimmedUrl).scheme?.lowercase() }.getOrNull()
+        trimmedUrl.isNotBlank() && (scheme == "http" || scheme == "https")
+    }
+    val canAttach = selectedUri != null || (urlMode && validUrl)
+
+    val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        uri ?: return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        selectedUri = uri
+        selectedName = uri.lastPathSegment?.substringAfterLast('/')
+        urlMode = false
+        url = ""
+    }
+
+    GlassCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Прикреплённые дорожки", color = AppColors.TextLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(audio.size.toString(), color = AppColors.TextMuted, fontSize = 11.sp)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Название дорожки") },
+                    placeholder = { Text("Минус, вокал, гитара…") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                )
+                StageIconButton(
+                    icon = Icons.Default.AttachFile,
+                    contentDescription = "Выбрать аудиофайл",
+                    active = selectedUri != null,
+                    onClick = { fileLauncher.launch(arrayOf("audio/*")) }
+                )
+                StageIconButton(
+                    icon = Icons.Default.Link,
+                    contentDescription = "Прикрепить аудио по ссылке",
+                    active = urlMode,
+                    onClick = {
+                        urlMode = !urlMode
+                        if (urlMode) {
+                            selectedUri = null
+                            selectedName = null
+                        }
+                    }
+                )
+            }
+
+            selectedUri?.let {
+                Text(
+                    "Выбран файл: ${selectedName ?: it.lastPathSegment ?: "аудио"}",
+                    color = AppColors.TextMuted,
+                    fontSize = 11.sp,
+                    maxLines = 1
+                )
+            }
+
+            if (urlMode) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("Прямая ссылка на аудио") },
+                    placeholder = { Text("https://…") },
+                    singleLine = true,
+                    isError = url.isNotBlank() && !validUrl,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (url.isNotBlank() && !validUrl) {
+                    Text("Нужна ссылка http/https", color = AppColors.Error, fontSize = 10.sp)
+                }
+            }
+
+            if (selectedUri != null || urlMode) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    StageIconButton(
+                        icon = Icons.Default.Check,
+                        contentDescription = "Прикрепить выбранную дорожку",
+                        active = canAttach,
+                        enabled = canAttach,
+                        onClick = {
+                            val fallback = title.trim().ifBlank {
+                                selectedName?.substringBeforeLast('.')?.takeIf { it.isNotBlank() }
+                                    ?: trimmedUrl.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() }
+                                    ?: "Дорожка ${audio.size + 1}"
+                            }
+                            selectedUri?.let { uri ->
+                                vm.addAudioFromUri(context, songId, fallback, uri, uploadedBy = null)
+                            } ?: run {
+                                if (validUrl) vm.addAudioFromUrl(songId, fallback, trimmedUrl, uploadedBy = null)
+                            }
+                            title = ""
+                            selectedUri = null
+                            selectedName = null
+                            url = ""
+                            urlMode = false
+                        }
+                    )
+                }
+            }
+
+            when (val status = uploadStatus) {
+                is SongViewerViewModel.AudioUploadStatus.InProgress ->
+                    Text("Загружаем «${status.title}»…", color = AppColors.PrimaryLight, fontSize = 11.sp)
+                is SongViewerViewModel.AudioUploadStatus.Failed ->
+                    Text(status.reason, color = AppColors.Error, fontSize = 11.sp)
+                is SongViewerViewModel.AudioUploadStatus.Success ->
+                    Text("«${status.title}» добавлено", color = AppColors.PrimaryLight, fontSize = 11.sp)
+                else -> Unit
+            }
+
+            audio.forEach { item ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(AppColors.BgSurface.copy(alpha = 0.8f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(item.title, color = AppColors.TextLight, fontSize = 12.sp, maxLines = 1)
+                        Text(if (item.uri.isNotBlank()) "Файл" else "URL", color = AppColors.TextMuted, fontSize = 10.sp)
+                    }
+                    StageIconButton(
+                        icon = Icons.Default.Delete,
+                        contentDescription = "Открепить ${item.title}",
+                        buttonSize = 36.dp,
+                        iconSize = 17.dp,
+                        onClick = { vm.removeAudio(item) }
+                    )
+                }
             }
         }
     }
@@ -415,33 +604,6 @@ private fun ColorDot(color: Color, selected: Boolean, onClick: () -> Unit) {
 private fun parseColorOrDefault(rawHex: String): Color {
     return runCatching { Color(android.graphics.Color.parseColor(rawHex)) }
         .getOrElse { AppColors.PrimaryLight }
-}
-
-private fun editorHasHighlight(value: TextFieldValue): Boolean {
-    return value.text.contains("<mark>", ignoreCase = true) && value.text.contains("</mark>", ignoreCase = true)
-}
-
-private fun sanitizeHighlightEdges(text: String): String {
-    return text
-        .replace(Regex("(?i)<mark>\\s+"), "<mark>")
-        .replace(Regex("(?i)\\s+</mark>"), "</mark>")
-}
-
-private fun editorHighlightBlockColor(value: TextFieldValue): Color {
-    if (!editorHasHighlight(value)) return Color.Transparent
-    return if (AppColors.isDark) {
-        AppColors.BgCardHover.copy(alpha = 0.98f)
-    } else {
-        AppColors.BgDeep.copy(alpha = 0.42f)
-    }
-}
-
-private fun editorHighlightBorderColor(): Color {
-    return if (AppColors.isDark) {
-        AppColors.TextMuted.copy(alpha = 0.30f)
-    } else {
-        AppColors.TextDim.copy(alpha = 0.24f)
-    }
 }
 
 private object EffectTagHidingTransformation : VisualTransformation {
@@ -573,7 +735,11 @@ private fun currentEffectStyle(
 ): SpanStyle {
     return SpanStyle(
         color = color ?: Color.Unspecified,
-        background = Color.Unspecified,
+        background = if (highlighted) {
+            if (AppColors.isDark) AppColors.BgCardHover else AppColors.BgDeep.copy(alpha = 0.18f)
+        } else {
+            Color.Unspecified
+        },
         fontWeight = if (boldDepth > 0 || highlighted) FontWeight.Bold else null,
         fontStyle = if (italicDepth > 0) FontStyle.Italic else null,
         textDecoration = if (underlineDepth > 0) TextDecoration.Underline else null
@@ -583,7 +749,7 @@ private fun currentEffectStyle(
 private fun parseColorTag(tag: String): Color? {
     val value = tag.removePrefix("<color=").removePrefix("<COLOR=").removeSuffix(">")
         .trim().trim('"', '\'')
-    return runCatching { Color(android.graphics.Color.parseColor(value)) }.getOrNull()
+    return runCatching { Color(android.graphics.Color.parseColor(SongFormatting.toAndroidColor(value))) }.getOrNull()
 }
 
 private fun toggleSelectionColorTag(value: TextFieldValue, colorHex: String): TextFieldValue {
@@ -611,49 +777,6 @@ private fun toggleSelectionColorTag(value: TextFieldValue, colorHex: String): Te
     return wrapSelectionWithCustomTags(value, "<color=$normalizedColorHex>", closeTag)
 }
 
-private fun toggleSelectionHighlightTag(value: TextFieldValue): TextFieldValue {
-    val start = min(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
-    val end = max(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
-    if (start == end) return value
-
-    val blockStart = value.text.lastIndexOf("<mark>", startIndex = start)
-    val blockEnd = value.text.indexOf("</mark>", startIndex = start).takeIf { it >= 0 }?.plus("</mark>".length) ?: -1
-    if (blockStart >= 0 && blockEnd > blockStart && end <= blockEnd) {
-        val unwrappedBlock = value.text.substring(blockStart + "<mark>".length, blockEnd - "</mark>".length)
-        val newText = sanitizeHighlightEdges(value.text.substring(0, blockStart) + unwrappedBlock + value.text.substring(blockEnd))
-        return TextFieldValue(
-            text = newText,
-            selection = TextRange(blockStart, blockStart + unwrappedBlock.length)
-        )
-    }
-
-    val lineStart = value.text.lastIndexOf('\n', startIndex = (start - 1).coerceAtLeast(0))
-        .let { if (it == -1) 0 else it + 1 }
-    val lineEnd = value.text.indexOf('\n', startIndex = end)
-        .let { if (it == -1) value.text.length else it }
-
-    val selectedBlock = value.text.substring(lineStart, lineEnd)
-    val trimmedBlock = selectedBlock.trim()
-    val fullyWrapped = trimmedBlock.startsWith("<mark>") && trimmedBlock.endsWith("</mark>")
-
-    return if (fullyWrapped) {
-        val unwrappedBlock = selectedBlock
-            .replaceFirst("<mark>", "")
-            .replaceFirst("</mark>", "")
-        val newText = sanitizeHighlightEdges(value.text.substring(0, lineStart) + unwrappedBlock + value.text.substring(lineEnd))
-        TextFieldValue(
-            text = newText,
-            selection = TextRange(lineStart, lineStart + unwrappedBlock.length)
-        )
-    } else {
-        val wrappedBlock = sanitizeHighlightEdges("<mark>$selectedBlock</mark>")
-        val newText = value.text.substring(0, lineStart) + wrappedBlock + value.text.substring(lineEnd)
-        TextFieldValue(
-            text = newText,
-            selection = TextRange(lineStart, lineStart + wrappedBlock.length)
-        )
-    }
-}
 
 private fun toggleSelectionWithCustomTags(value: TextFieldValue, openTag: String, closeTag: String): TextFieldValue {
     val start = min(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
@@ -717,54 +840,6 @@ private fun wrapSelectionWithChordTag(value: TextFieldValue): TextFieldValue {
     )
 }
 
-private fun clearFormattingFromSelection(value: TextFieldValue): TextFieldValue {
-    if (value.text.isEmpty()) return value
-    val start = min(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
-    val end = max(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
-    if (start == end) return value
-
-    return try {
-        val safeSearchEnd = (end - 1).coerceIn(0, value.text.length - 1)
-
-        val lineStart = value.text.lastIndexOf('\n', startIndex = (start - 1).coerceAtLeast(0))
-            .let { if (it == -1) 0 else it + 1 }
-        val lineEnd = value.text.indexOf('\n', startIndex = end)
-            .let { if (it == -1) value.text.length else it }
-
-        val blockStartCandidates = listOf(
-            value.text.lastIndexOf("<mark>", startIndex = safeSearchEnd),
-            value.text.lastIndexOf("<b>", startIndex = safeSearchEnd),
-            value.text.lastIndexOf("<i>", startIndex = safeSearchEnd),
-            value.text.lastIndexOf("<u>", startIndex = safeSearchEnd),
-            value.text.lastIndexOf("<color=", startIndex = safeSearchEnd)
-        ).filter { it >= 0 }
-        val blockStart = (blockStartCandidates.minOrNull() ?: lineStart).coerceIn(0, start)
-
-        val blockEndCandidates = listOf(
-            value.text.indexOf("</mark>", startIndex = start).takeIf { it >= 0 }?.plus("</mark>".length) ?: -1,
-            value.text.indexOf("</b>", startIndex = start).takeIf { it >= 0 }?.plus("</b>".length) ?: -1,
-            value.text.indexOf("</i>", startIndex = start).takeIf { it >= 0 }?.plus("</i>".length) ?: -1,
-            value.text.indexOf("</u>", startIndex = start).takeIf { it >= 0 }?.plus("</u>".length) ?: -1,
-            value.text.indexOf("</color>", startIndex = start).takeIf { it >= 0 }?.plus("</color>".length) ?: -1
-        ).filter { it >= 0 }
-        val blockEnd = (blockEndCandidates.maxOrNull() ?: lineEnd).coerceIn(end, value.text.length)
-
-        val target = value.text.substring(blockStart, blockEnd)
-            .replace(Regex("(?i)</?mark>"), "")
-            .replace(Regex("(?i)</?b>"), "")
-            .replace(Regex("(?i)</?i>"), "")
-            .replace(Regex("(?i)</?u>"), "")
-            .replace(Regex("(?i)<color=[^>]+>|</color>"), "")
-
-        val newText = value.text.substring(0, blockStart) + target + value.text.substring(blockEnd)
-        TextFieldValue(
-            text = newText,
-            selection = TextRange(blockStart, blockStart + target.length)
-        )
-    } catch (_: Exception) {
-        value
-    }
-}
 
 private fun wrapSelectionWithCustomTags(value: TextFieldValue, openTag: String, closeTag: String): TextFieldValue {
     val start = min(value.selection.start, value.selection.end).coerceIn(0, value.text.length)
@@ -779,16 +854,9 @@ private fun wrapSelectionWithCustomTags(value: TextFieldValue, openTag: String, 
         )
     }
 
-    val selected = value.text.substring(start, end)
-    val replacement = "$openTag$selected$closeTag"
-    val rawNewText = value.text.substring(0, start) + replacement + value.text.substring(end)
-    val newText = if (openTag.equals("<mark>", ignoreCase = true) && closeTag.equals("</mark>", ignoreCase = true)) {
-        sanitizeHighlightEdges(rawNewText)
-    } else {
-        rawNewText
-    }
+    val edit = SongFormatting.wrapBalanced(value.text, start, end, openTag, closeTag)
     return TextFieldValue(
-        text = newText,
-        selection = TextRange(start + replacement.length)
+        text = edit.text,
+        selection = TextRange(edit.selectionStart, edit.selectionEnd)
     )
 }
